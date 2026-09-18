@@ -1,0 +1,41 @@
+# 密钥与本地配置（切勿提交）
+.env
+.env.*
+!.env.example
+
+# 临时与协作缓存
+.cowork-temp/
+*.tmp
+*.temp
+
+# 运行产物：截图、下载的官方表格等（不同步）
+screenshots/
+demo_out/
+demo_out2/
+
+# 本地生成的筛查 / 测试报告（不同步）
+*_sanctions_report.html
+*_sanctions_report.pdf
+*_api_report.md
+*_verification.md
+
+# 微信公众号等非 skill 核心素材（不同步）
+article_*.md
+article_*.html
+build_wechat_article.py
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+ENV/
+
+# 操作系统与编辑器
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
