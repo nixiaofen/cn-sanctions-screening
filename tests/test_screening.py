@@ -241,5 +241,72 @@ class TestSourceUrls(unittest.TestCase):
         self.assertEqual(ofac.get("type"), "form_search")
 
 
+# ─────────────────────────────────────────────────────────────
+# 9. 源配置表（回归：元数据散落 6 处，加源要改 6~9 处）
+# ─────────────────────────────────────────────────────────────
+class TestSourceProfiles(unittest.TestCase):
+    def test_profiles_cover_all_sources(self):
+        import browser_verify as bv
+        self.assertEqual(set(bv.SOURCE_PROFILES), set(bv.SOURCES),
+                         "配置表与 SOURCES 的源集合必须完全一致")
+
+    def test_self_validation_reports_no_issues(self):
+        import browser_verify as bv
+        issues = bv.validate_source_profiles()
+        self.assertEqual(issues, [], f"配置表自检发现问题：{issues}")
+
+    def test_every_source_has_legal_context(self):
+        """回归：中国三源原先在 SOURCE_CONTEXT 里完全缺失，报告章节是空白"""
+        import browser_verify as bv
+        for key in bv.SOURCES:
+            self.assertTrue(bv.SOURCE_PROFILES[key]["context"],
+                            f"{key} 缺少法律背景说明，报告该源章节会是空白")
+
+    def test_cn_sources_have_keywords_and_fallback(self):
+        import browser_verify as bv
+        for key in ("cn_ucl", "cn_control", "cn_counter"):
+            prof = bv.SOURCE_PROFILES[key]
+            self.assertTrue(prof["cn_keywords"], f"{key} 缺少公告标题关键词")
+            self.assertTrue(prof["cn_fallback_url"], f"{key} 缺少兜底入口")
+
+    def test_tier_assignment_consistent(self):
+        import browser_verify as bv
+        for key, prof in bv.SOURCE_PROFILES.items():
+            if key in bv.CORE_SOURCES:
+                self.assertEqual(prof["tier"], "core")
+                self.assertTrue(prof["is_core"])
+            elif key in bv.FP_CANDIDATE_SOURCES:
+                self.assertEqual(prof["tier"], "fp_candidate")
+                self.assertTrue(prof["needs_fp_check"])
+            else:
+                self.assertEqual(prof["tier"], "other")
+
+    def test_cn_counter_context_mentions_natural_persons(self):
+        """反制清单对象含高管/自然人，须在法律背景中写明个人也要筛查"""
+        import browser_verify as bv
+        ctx = bv.SOURCE_PROFILES["cn_counter"]["context"]
+        blob = ctx.get("legal", "") + ctx.get("background", "") + ctx.get("method", "")
+        self.assertTrue(any(k in blob for k in ("高管", "自然人", "个人")),
+                        f"反制清单背景须写明自然人也要筛查，实际为：{blob}")
+
+
+# ─────────────────────────────────────────────────────────────
+# 10. 渲染资源外提（P2-6：CSS/JS 已移出 browser_verify）
+# ─────────────────────────────────────────────────────────────
+class TestReportAssetsExtracted(unittest.TestCase):
+    def test_report_assets_module_exists(self):
+        import report_assets
+        self.assertTrue(len(report_assets.REPORT_CSS) > 1000, "REPORT_CSS 疑似未正确外提")
+        self.assertIn("scrollIntoView", report_assets.REPORT_JS)
+
+    def test_browser_verify_no_longer_embeds_css(self):
+        path = os.path.join(SCRIPTS, "browser_verify.py")
+        with open(path, encoding="utf-8") as f:
+            src = f.read()
+        self.assertNotIn('            REPORT_CSS = """',
+                         "REPORT_CSS 仍内嵌在 browser_verify 中")
+        self.assertIn("from report_assets import REPORT_CSS", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

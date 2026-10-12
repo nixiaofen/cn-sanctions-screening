@@ -180,6 +180,184 @@ CORE_SOURCES = frozenset({"ofac", "bis_csl", "dod_1260h", "sam", "uk", "un"})
 FP_CANDIDATE_SOURCES = frozenset({"eu", "au", "ca"})
 
 
+# ══════════════════════════════════════════════════════════════
+# 源的完整配置表（P2-7）
+# 原先散落在 6 处：SOURCES / RESULT_INDICATORS / SOURCE_CONTEXT /
+# SOURCE_TO_OS_DATASETS / CORE_SOURCES+FP_CANDIDATE_SOURCES /
+# CN_LIST_KEYWORDS+CN_FALLBACK_URLS。新增一个源原本要改 6~9 处，
+# 现在只需在本表登记元数据 + 提供一个 verify 函数（各源交互差异大，
+# 不强行数据驱动化）。
+# ══════════════════════════════════════════════════════════════
+
+SOURCE_CONTEXT = {
+    "ofac": {
+        "full_name": "美国财政部海外资产控制办公室特别指定国民清单 (OFAC SDN List)",
+        "background": "OFAC SDN 清单是全球最具影响力的制裁名单之一，由美国财政部维护。被列入 SDN 清单意味着该实体在美国管辖范围内的所有资产将被冻结，且禁止美国人（包括公司）与其进行任何交易。",
+        "legal": "违反 OFAC 制裁可能导致高达数百万美元的民事罚款和刑事处罚（含最高 20 年监禁）。根据《国际紧急经济权力法》(IEEPA) 和《贸易敌国法》执行。",
+        "method": "通过 OFAC 官方在线搜索引擎（sanctionssearch.ofac.treas.gov）进行模糊匹配搜索，阈值设置为 70 分。",
+    },
+    "bis_csl": {
+        "full_name": "美国商务部工业与安全局综合筛查清单 (BIS Consolidated Screening List)",
+        "background": "CSL 整合了美国政府多个出口管制清单，包括实体清单(Entity List)、被拒绝人清单(Denied Persons List)、未经验证清单(Unverified List)等。被列入意味着向该实体出口受管控物项需要特殊许可证或被完全禁止。",
+        "legal": "违反出口管制法规（EAR）可能导致每次违规高达 $300,000 的民事罚款，或交易金额的两倍（取较高者）。刑事处罚最高可达 $1,000,000 和 20 年监禁。",
+        "method": "通过 trade.gov CSL 搜索引擎在线搜索 + 下载官方 CSV 数据文件进行离线全量匹配验证。",
+    },
+    "dod_1260h": {
+        "full_name": "美国国防部中国军事企业清单 (DoD Section 1260H)",
+        "background": "根据《国防授权法》第 1260H 条，美国国防部每年公布与中国军方有关联的企业清单。该清单虽不直接禁止交易，但列入该清单的实体面临更严格的审查，且可能触发投资限制（根据第 13959 号行政令）。",
+        "legal": "被列入企业的美国上市证券可能被禁止交易。美国投资者持有的相关证券可能需要在规定期限内剥离。",
+        "method": "通过国防部官方网站访问名单 PDF 文件，在浏览器中直接查看并搜索匹配。",
+    },
+    "sam": {
+        "full_name": "美国联邦政府采购排除清单 (SAM.gov Exclusions)",
+        "background": "SAM.gov 排除清单列出被禁止参与美国联邦政府采购和非采购项目的实体。被排除的实体无法获得联邦合同、赠款或其他援助。",
+        "legal": "与被排除实体签订联邦合同属于违法行为。相关机构有义务在授标前检查此清单。",
+        "method": "通过 SAM.gov 官方搜索接口进行实体查询。",
+    },
+    "fcc": {
+        "full_name": "美国联邦通信委员会受管设备和服务清单 (FCC Covered List)",
+        "background": "根据《安全和可信通信网络法》第 2 条，FCC 公布对美国国家安全构成不可接受风险的通信设备和服务清单。被列入的设备/服务不得使用联邦资金采购，且现有设备可能需要拆除和更换。",
+        "legal": "使用联邦资金采购被列入清单的设备属于违规行为。\"Rip and Replace\" 计划要求替换已部署的受管设备。",
+        "method": "直接访问 FCC Supply Chain 页面，加载完整设备清单后进行文本搜索和高亮匹配。",
+    },
+    "uk": {
+        "full_name": "英国金融制裁清单 (UK Financial Sanctions / OFSI)",
+        "background": "英国金融制裁实施办公室(OFSI)维护的制裁清单。英国脱欧后独立于欧盟制裁体系运作。被列入意味着在英国管辖范围内的资产将被冻结，且禁止向其提供资金或经济资源。",
+        "legal": "违反英国金融制裁属于刑事犯罪，可能面临最高 7 年监禁和/或无上限罚款。OFSI 也可以施加民事罚款（最高 $100万或违规金额的 50%）。",
+        "method": "通过英国制裁搜索官方网站进行搜索，启用模糊匹配(Fuzzy Match)以提高召回率。",
+    },
+    "un": {
+        "full_name": "联合国安理会综合制裁清单 (UN Security Council Consolidated List)",
+        "background": "联合国安理会制裁是国际社会最权威的制裁机制，由安理会决议授权。所有联合国成员国均有义务执行。清单目标包括恐怖主义、大规模杀伤性武器扩散等威胁国际和平与安全的活动。",
+        "legal": "联合国成员国有国际法义务执行安理会制裁决议。未能执行可能导致来自安理会的额外措施。",
+        "method": "通过联合国安理会制裁委员会官方搜索系统查询。",
+    },
+    "eu": {
+        "full_name": "欧盟金融制裁综合清单 (EU Consolidated Financial Sanctions)",
+        "background": "欧盟制裁清单由欧盟理事会决定，所有成员国均须执行。措施包括资产冻结、旅行禁令和贸易限制。欧盟制裁的域外效力不断扩大。",
+        "legal": "违反欧盟制裁在各成员国均属于刑事犯罪。各国的处罚力度不同，但通常包括巨额罚款和监禁。",
+        "method": "通过欧盟制裁地图(EU Sanctions Map)官方搜索引擎查询。",
+    },
+    "au": {
+        "full_name": "澳大利亚外交与贸易部制裁综合清单 (Australia DFAT Consolidated List)",
+        "background": "澳大利亚根据《自治制裁法 2011》和联合国安理会制裁决议维护制裁清单。违反澳大利亚制裁属于刑事犯罪。",
+        "legal": "违反制裁可面临最高 10 年监禁和/或罚款。企业可能面临最高相当于违规交易价值 3 倍的罚款。",
+        "method": "下载 DFAT 官方 XLSX 数据文件（Australian_Sanctions_Consolidated_List.xlsx），使用 pandas 进行全量本地检索，匹配结果渲染为表格截图。",
+    },
+    "ca": {
+        "full_name": "加拿大特别经济措施制裁清单 (Canada SEMA Consolidated List)",
+        "background": "加拿大根据《特别经济措施法》(SEMA)、《联合国法》等法律实施制裁。加拿大制裁包括资产冻结、交易禁令和贸易限制。",
+        "legal": "违反加拿大制裁可面临最高 $25,000 罚款和/或最高 5 年监禁。",
+        "method": "通过加拿大全球事务部官方搜索引擎进行查询。",
+    },
+    # ── 中国管制清单（本 fork 新增）──
+    "cn_ucl": {
+        "full_name": "中国商务部不可靠实体清单 (Unreliable Entity List)",
+        "background": "由商务部不可靠实体清单工作机制依《不可靠实体清单规定》发布，"
+                      "针对危害中国主权、安全、发展利益或违反正常市场交易原则的外国实体。"
+                      "以公告形式逐次发布，不提供统一在线查询库。",
+        "legal": "列入后禁止该企业从事与中国有关的进出口活动，并禁止在中国境内新增投资；"
+                 "企业高级管理人员不得入境，工作许可/停留/居留资格不予批准或取消。",
+        "method": "商务部法律政策栏目列表页 → 定位公告 → 进入正文全文比对（含中英文名）→ 截图留痕。"
+                  "覆盖率不足 60% 时不判清洁，转人工复核。",
+    },
+    "cn_control": {
+        "full_name": "中国商务部出口管制管控名单 (Export Control Control List)",
+        "background": "依《出口管制法》《两用物项出口管制条例》发布，针对受出口管制的外国实体，"
+                      "禁止向其出口两用物项。以商务部公告形式逐次发布。",
+        "legal": "禁止向上述实体出口两用物项；正在开展的相关出口活动应当立即停止；"
+                 "特殊情况下确需出口的，出口经营者应当向商务部提出申请。",
+        "method": "同 cn_ucl：栏目列表页 → 公告正文 → 全文比对 → 截图留痕。",
+    },
+    "cn_counter": {
+        "full_name": "中国外交部反制清单 (Counter-Sanctions List)",
+        "background": "依《反外国制裁法》对特定外国国家、组织、个人发布的反制清单，"
+                      "以「决定＋附件清单」形式公布，对象为企业及相关高级管理人员。",
+        "legal": "冻结其在我国境内的动产、不动产和其他各类财产；"
+                 "禁止我国境内的组织、个人与其进行有关交易、合作等活动；"
+                 "对个人还含不予签发签证、不准入境。",
+        "method": "外交部官网检索反制决定 → 进入附件清单 → 全文比对 → 截图留痕。"
+                  "须注意清单同时含企业与自然人，两类对象均需筛查。",
+    },
+}
+
+SOURCE_TO_OS_DATASETS = {
+    "ofac": {"us_ofac_sdn", "us_ofac_cons", "us_sam_exclusions"},
+    "bis_csl": {"us_trade_csl", "us_bis_denied"},
+    "dod_1260h": {"us_dod_chinese_milcorps"},
+    "sam": {"us_sam_exclusions"},
+    "uk": {"gb_hmt_sanctions"},
+    "un": {"un_sc_sanctions"},
+    "eu": {"eu_fsf"},
+    "au": {"au_dfat_sanctions"},
+    "ca": {"ca_sema_sanctions"},
+    "fcc":    set(),   # FCC 无对应 OpenSanctions 制裁数据集，不做交叉验证
+    "cn_ucl":     set(),   # 中国清单未被 OpenSanctions 收录，无交叉验证源
+    "cn_control": set(),
+    "cn_counter": set(),
+}
+
+
+def _build_source_profiles():
+    """把分散的源元数据汇总为单一配置表。
+
+    这是"新增一个源从改 6~9 处降到改 1~2 处"的落地实现：
+    各处原有的常量改为从本表派生，行为保持不变。
+    """
+    profiles = {}
+    for key in SOURCES:
+        if key in CORE_SOURCES:
+            tier = "core"          # 核心清单：命中通常不是同名误中
+        elif key in FP_CANDIDATE_SOURCES:
+            tier = "fp_candidate"  # 泛化清单：易同名碰撞，需交叉验证
+        else:
+            tier = "other"
+        profiles[key] = {
+            "key": key,
+            "name": SOURCES[key].get("name", key),
+            "url": SOURCES[key].get("url", ""),
+            "tier": tier,
+            "is_core": key in CORE_SOURCES,
+            "needs_fp_check": key in FP_CANDIDATE_SOURCES,
+            "result_indicators": RESULT_INDICATORS.get(key, []),
+            "context": SOURCE_CONTEXT.get(key, {}),
+            "os_datasets": set(SOURCE_TO_OS_DATASETS.get(key, set())),
+            "cn_keywords": CN_LIST_KEYWORDS.get(key, []),
+            "cn_fallback_url": CN_FALLBACK_URLS.get(key),
+            "is_cn_list": key in CN_LIST_KEYWORDS,
+        }
+    return profiles
+
+
+def validate_source_profiles(profiles=None, sources=None):
+    """自检：配置表与 SOURCES 是否一致。返回问题列表（空=健康）。
+
+    供测试与启动时调用，防止"加了源忘了登记元数据"这类静默缺口。
+    """
+    profiles = profiles if profiles is not None else SOURCE_PROFILES
+    sources = sources if sources is not None else SOURCES
+    issues = []
+    missing = set(sources) - set(profiles)
+    extra = set(profiles) - set(sources)
+    if missing:
+        issues.append(f"以下源未登记进配置表：{sorted(missing)}")
+    if extra:
+        issues.append(f"配置表含已不存在的源：{sorted(extra)}")
+    for key, prof in profiles.items():
+        if key not in sources:
+            continue
+        if not prof.get("name"):
+            issues.append(f"{key}: 缺少显示名")
+        if not prof.get("url"):
+            issues.append(f"{key}: 缺少入口 URL")
+        if not prof.get("context"):
+            issues.append(f"{key}: 缺少法律背景说明（报告该源章节会是空白）")
+        if prof["tier"] == "core" and not prof.get("os_datasets"):
+            issues.append(f"{key}: 核心清单但无 OpenSanctions 交叉验证数据集")
+    return issues
+
+
+
 # ============================================================
 # 浏览器隐身 JS（注入到每个页面，让 Playwright 伪装成真实 Chrome）
 # ============================================================
@@ -289,6 +467,10 @@ RESULT_INDICATORS = {
     "un": [".results", ".search-results", "table"],
     "eu": [".sanctions-list", ".regime-list", "[class*='result']"],
 }
+
+# 依赖 SOURCES / CORE / FP / SOURCE_CONTEXT / SOURCE_TO_OS_DATASETS /
+# CN_LIST_KEYWORDS / CN_FALLBACK_URLS / RESULT_INDICATORS，必须在它们之后求值。
+SOURCE_PROFILES = _build_source_profiles()
 
 
 def _dismiss_cookie_banner(page):
@@ -2197,68 +2379,6 @@ def format_results_markdown(entity, results, entity_type="Entity"):
     每个名单包含：背景说明、法律含义、搜索方法、发现、结论 + 证据截图。
     """
     # 各制裁源的背景描述与法律含义
-    SOURCE_CONTEXT = {
-        "ofac": {
-            "full_name": "美国财政部海外资产控制办公室特别指定国民清单 (OFAC SDN List)",
-            "background": "OFAC SDN 清单是全球最具影响力的制裁名单之一，由美国财政部维护。被列入 SDN 清单意味着该实体在美国管辖范围内的所有资产将被冻结，且禁止美国人（包括公司）与其进行任何交易。",
-            "legal": "违反 OFAC 制裁可能导致高达数百万美元的民事罚款和刑事处罚（含最高 20 年监禁）。根据《国际紧急经济权力法》(IEEPA) 和《贸易敌国法》执行。",
-            "method": "通过 OFAC 官方在线搜索引擎（sanctionssearch.ofac.treas.gov）进行模糊匹配搜索，阈值设置为 70 分。",
-        },
-        "bis_csl": {
-            "full_name": "美国商务部工业与安全局综合筛查清单 (BIS Consolidated Screening List)",
-            "background": "CSL 整合了美国政府多个出口管制清单，包括实体清单(Entity List)、被拒绝人清单(Denied Persons List)、未经验证清单(Unverified List)等。被列入意味着向该实体出口受管控物项需要特殊许可证或被完全禁止。",
-            "legal": "违反出口管制法规（EAR）可能导致每次违规高达 $300,000 的民事罚款，或交易金额的两倍（取较高者）。刑事处罚最高可达 $1,000,000 和 20 年监禁。",
-            "method": "通过 trade.gov CSL 搜索引擎在线搜索 + 下载官方 CSV 数据文件进行离线全量匹配验证。",
-        },
-        "dod_1260h": {
-            "full_name": "美国国防部中国军事企业清单 (DoD Section 1260H)",
-            "background": "根据《国防授权法》第 1260H 条，美国国防部每年公布与中国军方有关联的企业清单。该清单虽不直接禁止交易，但列入该清单的实体面临更严格的审查，且可能触发投资限制（根据第 13959 号行政令）。",
-            "legal": "被列入企业的美国上市证券可能被禁止交易。美国投资者持有的相关证券可能需要在规定期限内剥离。",
-            "method": "通过国防部官方网站访问名单 PDF 文件，在浏览器中直接查看并搜索匹配。",
-        },
-        "sam": {
-            "full_name": "美国联邦政府采购排除清单 (SAM.gov Exclusions)",
-            "background": "SAM.gov 排除清单列出被禁止参与美国联邦政府采购和非采购项目的实体。被排除的实体无法获得联邦合同、赠款或其他援助。",
-            "legal": "与被排除实体签订联邦合同属于违法行为。相关机构有义务在授标前检查此清单。",
-            "method": "通过 SAM.gov 官方搜索接口进行实体查询。",
-        },
-        "fcc": {
-            "full_name": "美国联邦通信委员会受管设备和服务清单 (FCC Covered List)",
-            "background": "根据《安全和可信通信网络法》第 2 条，FCC 公布对美国国家安全构成不可接受风险的通信设备和服务清单。被列入的设备/服务不得使用联邦资金采购，且现有设备可能需要拆除和更换。",
-            "legal": "使用联邦资金采购被列入清单的设备属于违规行为。\"Rip and Replace\" 计划要求替换已部署的受管设备。",
-            "method": "直接访问 FCC Supply Chain 页面，加载完整设备清单后进行文本搜索和高亮匹配。",
-        },
-        "uk": {
-            "full_name": "英国金融制裁清单 (UK Financial Sanctions / OFSI)",
-            "background": "英国金融制裁实施办公室(OFSI)维护的制裁清单。英国脱欧后独立于欧盟制裁体系运作。被列入意味着在英国管辖范围内的资产将被冻结，且禁止向其提供资金或经济资源。",
-            "legal": "违反英国金融制裁属于刑事犯罪，可能面临最高 7 年监禁和/或无上限罚款。OFSI 也可以施加民事罚款（最高 $100万或违规金额的 50%）。",
-            "method": "通过英国制裁搜索官方网站进行搜索，启用模糊匹配(Fuzzy Match)以提高召回率。",
-        },
-        "un": {
-            "full_name": "联合国安理会综合制裁清单 (UN Security Council Consolidated List)",
-            "background": "联合国安理会制裁是国际社会最权威的制裁机制，由安理会决议授权。所有联合国成员国均有义务执行。清单目标包括恐怖主义、大规模杀伤性武器扩散等威胁国际和平与安全的活动。",
-            "legal": "联合国成员国有国际法义务执行安理会制裁决议。未能执行可能导致来自安理会的额外措施。",
-            "method": "通过联合国安理会制裁委员会官方搜索系统查询。",
-        },
-        "eu": {
-            "full_name": "欧盟金融制裁综合清单 (EU Consolidated Financial Sanctions)",
-            "background": "欧盟制裁清单由欧盟理事会决定，所有成员国均须执行。措施包括资产冻结、旅行禁令和贸易限制。欧盟制裁的域外效力不断扩大。",
-            "legal": "违反欧盟制裁在各成员国均属于刑事犯罪。各国的处罚力度不同，但通常包括巨额罚款和监禁。",
-            "method": "通过欧盟制裁地图(EU Sanctions Map)官方搜索引擎查询。",
-        },
-        "au": {
-            "full_name": "澳大利亚外交与贸易部制裁综合清单 (Australia DFAT Consolidated List)",
-            "background": "澳大利亚根据《自治制裁法 2011》和联合国安理会制裁决议维护制裁清单。违反澳大利亚制裁属于刑事犯罪。",
-            "legal": "违反制裁可面临最高 10 年监禁和/或罚款。企业可能面临最高相当于违规交易价值 3 倍的罚款。",
-            "method": "下载 DFAT 官方 XLSX 数据文件（Australian_Sanctions_Consolidated_List.xlsx），使用 pandas 进行全量本地检索，匹配结果渲染为表格截图。",
-        },
-        "ca": {
-            "full_name": "加拿大特别经济措施制裁清单 (Canada SEMA Consolidated List)",
-            "background": "加拿大根据《特别经济措施法》(SEMA)、《联合国法》等法律实施制裁。加拿大制裁包括资产冻结、交易禁令和贸易限制。",
-            "legal": "违反加拿大制裁可面临最高 $25,000 罚款和/或最高 5 年监禁。",
-            "method": "通过加拿大全球事务部官方搜索引擎进行查询。",
-        },
-    }
 
     lines = []
     lines.append(f"# 🏛️ 全球制裁与出口管制合规筛查报告\n")
@@ -2272,17 +2392,6 @@ def format_results_markdown(entity, results, entity_type="Entity"):
     # ═══ 自动 OpenSanctions 交叉验证 ═══
     # 对每个 HIT 结果做交叉验证，判断是否为误中
     # 源 key → OpenSanctions datasets 映射
-    SOURCE_TO_OS_DATASETS = {
-        "ofac": {"us_ofac_sdn", "us_ofac_cons", "us_sam_exclusions"},
-        "bis_csl": {"us_trade_csl", "us_bis_denied"},
-        "dod_1260h": {"us_dod_chinese_milcorps"},
-        "sam": {"us_sam_exclusions"},
-        "uk": {"gb_hmt_sanctions"},
-        "un": {"un_sc_sanctions"},
-        "eu": {"eu_fsf"},
-        "au": {"au_dfat_sanctions"},
-        "ca": {"ca_sema_sanctions"},
-    }
     # 核心/泛化清单定义已上移到模块级 CORE_SOURCES / FP_CANDIDATE_SOURCES，
     # 此处仅保留旧名别名，避免同一概念出现两份定义。
     CORE_HIT_SOURCES = CORE_SOURCES
