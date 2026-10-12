@@ -150,6 +150,10 @@ CN_FALLBACK_URLS = {
     "cn_counter": "https://aqygzj.mofcom.gov.cn/flzc/index.html",
 }
 
+# 中国清单核验的最低公告覆盖率。低于此值不得判 clean——
+# 打不开的公告等于没查，未覆盖部分不能被「已核 N 份，未命中」掩盖。
+CN_MIN_COVERAGE = 0.6
+
 
 # ============================================================
 # 浏览器隐身 JS（注入到每个页面，让 Playwright 伪装成真实 Chrome）
@@ -792,6 +796,8 @@ def verify_dod_1260h(page, entity, out_dir, search_name, variants):
                 # Chrome PDF 是 out-of-process 渲染，Playwright 无法控制 Ctrl+F
                 # 用浏览器 fetch 下载 PDF → PyMuPDF 精确高亮每个匹配项 → 渲染高清图
                 found_variant = None
+                parse_failed = False
+                parse_error = ""
                 try:
                     import base64
                     pdf_b64 = page.evaluate("""async () => {
@@ -808,9 +814,22 @@ def verify_dod_1260h(page, entity, out_dir, search_name, variants):
                     result["screenshots"].extend(hl_screenshots)
                 except Exception as e:
                     print(f"  [WARN] PDF highlight failed: {e}")
-                    found_variant = search_name  # fallback
+                    # 解析失败 != 命中。原实现在此处 fallback 成 found_variant = search_name，
+                    # 导致 PyMuPDF 未安装 / PDF 损坏 / fetch 失败时**必然误报命中**。
+                    # 改为标记解析失败，结论落到 manual_review。
+                    parse_failed = True
+                    parse_error = str(e)
 
-                if found_variant:
+                if parse_failed:
+                    result["status"] = "manual_review"
+                    result["detail"] = (
+                        "DoD 1260H PDF 已打开，但文本解析失败，无法判定是否命中。"
+                        "常见原因：未安装 PyMuPDF(fitz)、PDF 损坏、或页面 fetch 失败。"
+                        "须人工打开 PDF 正文核对。原始错误：" + (parse_error or "unknown")
+                    )
+                    result["pdf_url"] = pdf_url
+                    print(f"  [REVIEW] PDF parse failed, manual review required: {parse_error}")
+                elif found_variant:
                     result["status"] = "hit"
                     result["detail"] = f"Found '{found_variant}' in DoD 1260H PDF"
                     result["pdf_url"] = pdf_url
@@ -1045,12 +1064,26 @@ def verify_uk(page, entity, out_dir, search_name, variants):
                 break
 
     # 智能判定状态
-    if "no results" in text.lower() or "0 results" in text.lower() or result_count == 0:
+    # ⚠️ 关键区分：「结果数解析成功且为 0」≠「结果数没解析出来」。
+    # 原实现 result_count 初值 0，正则未匹配时保持 0，被 `or result_count == 0`
+    # 直接判 clean —— 页面改版或加载失败时会静默产生**假阴性**。
+    text_lower = text.lower()
+    explicit_no_result = ("no results" in text_lower) or ("0 results" in text_lower)
+    count_parsed = count_match is not None
+
+    if explicit_no_result:
         result["status"] = "clean"
-        result["detail"] = "No match found"
+        result["detail"] = "No match found（页面明确显示无结果）"
+    elif not count_parsed:
+        result["status"] = "manual_review"
+        result["detail"] = (
+            "UK 结果页未能解析出结果计数（未匹配到 'N results' 模式），"
+            "无法区分「确实无结果」与「页面结构变更 / 加载失败 / 被拦截」。"
+            "**不得据此判定未命中**，须人工打开 UK Sanctions List 核对。"
+        )
+        print("  [REVIEW] UK result count unparsed -> manual review")
     elif result_count > 0:
         # 有结果，检查实体名是否出现在结果中
-        text_lower = text.lower()
         matched_variant = None
         for v in variants:
             if re.search(r'[\u4e00-\u9fff]', v):
@@ -1066,14 +1099,9 @@ def verify_uk(page, entity, out_dir, search_name, variants):
             result["status"] = "hit"
             result["detail"] = f"{result_count} results found (fuzzy match enabled, review recommended)"
     else:
-        # 无法提取结果数，检查文本匹配
-        text_lower = text.lower()
-        if any(v.lower() in text_lower for v in variants if not re.search(r'[\u4e00-\u9fff]', v)):
-            result["status"] = "hit"
-            result["detail"] = "Match found in page text"
-        else:
-            result["status"] = "clean"
-            result["detail"] = "No definitive match found"
+        # 结果数解析成功且明确为 0 —— 此时判 clean 才是安全的
+        result["status"] = "clean"
+        result["detail"] = "No match found（结果计数解析成功且为 0）"
 
     if not any(result["screenshots"]):
         fb = _screenshot(page, out_dir, "uk", search_name, "fallback")
@@ -1149,6 +1177,8 @@ def verify_un(page, entity, out_dir, search_name, variants):
         return False  # 超时
 
     # 直接用干净 context 搜索（绕过主 context 的 Sec-Fetch headers 干扰）
+    un_loaded = False
+    un_load_error = ""
     try:
         un_browser = page.context.browser
         fresh_context = un_browser.new_context(
@@ -1158,9 +1188,9 @@ def verify_un(page, entity, out_dir, search_name, variants):
         )
         fresh_page = fresh_context.new_page()
         fresh_page.goto(un_search_url, timeout=30000)
-        loaded = _un_search_on_page(fresh_page)
+        un_loaded = _un_search_on_page(fresh_page)
 
-        if loaded:
+        if un_loaded:
             fresh_page.wait_for_timeout(2000)
 
         s1 = _screenshot(fresh_page, out_dir, "un", search_name, "results")
@@ -1171,25 +1201,53 @@ def verify_un(page, entity, out_dir, search_name, variants):
         fresh_context.close()
     except Exception as e:
         print(f"  [ERROR] UN fresh context failed: {e}, falling back to main page")
+        un_load_error = str(e)
         # 兜底：用主 page
         if not _safe_goto(page, un_search_url, timeout=30000):
+            result["status"] = "manual_review"
+            result["detail"] = (
+                "UN 检索页无法打开（独立 context 与主 page 均失败），未取得任何结果，"
+                "须人工打开 UN 名单核对。原始错误：" + un_load_error
+            )
             return result
-        _un_search_on_page(page)
+        un_loaded = _un_search_on_page(page)
         s1 = _screenshot(page, out_dir, "un", search_name, "results")
         if s1:
             result["screenshots"].append(s1)
         text = _extract_text(page, max_chars=30000)
 
-    if "no results" in text.lower() or "no match" in text.lower() or "total: 0" in text.lower() or "0 results" in text.lower():
+    # ── 判定前置保护：未加载 / 正文过短，都不得判 clean ──
+    # 原实现此处直接 else → clean，导致 SPA 未加载、结果表为空时静默产生**假阴性**。
+    # UN 是最权威清单之一，此处原本反而最不设防，优先修补。
+    MIN_UN_TEXT = 1000
+    text_l = (text or "").lower()
+
+    if not un_loaded:
+        result["status"] = "manual_review"
+        result["detail"] = (
+            "UN 检索结果未确认加载（结果区持续 loading 或等待超时）。"
+            "**未加载不等于未命中**，须人工打开 UN 名单核对。"
+            + ((" 原始错误：" + un_load_error) if un_load_error else "")
+        )
+        print("  [REVIEW] UN results not confirmed loaded -> manual review")
+    elif len(text or "") < MIN_UN_TEXT:
+        result["status"] = "manual_review"
+        result["detail"] = (
+            f"UN 结果页正文仅 {len(text or '')} 字符（低于 {MIN_UN_TEXT} 阈值），疑似未完整渲染。"
+            "**不得据此判定未命中**，须人工核对。"
+        )
+        print("  [REVIEW] UN result page text too short -> manual review")
+    elif "no results" in text_l or "no match" in text_l or "total: 0" in text_l or "0 results" in text_l:
         result["status"] = "clean"
         result["detail"] = "No match found"
-    elif any(v.lower() in text.lower() for v in variants if not re.search(r'[\u4e00-\u9fff]', v)):
+    elif any(v.lower() in text_l for v in variants if not re.search(r'[\u4e00-\u9fff]', v)):
         result["status"] = "hit"
         result["detail"] = "Match found"
         hl = _highlight_text(page, search_name, out_dir, "un", search_name, "highlight")
         if hl:
             result["screenshots"].append(hl)
     else:
+        # 结果已加载且正文充足、仅是变体均未命中 —— 此时判 clean 才是安全的
         result["status"] = "clean"
         result["detail"] = "No match found in search results"
     if not any(result["screenshots"]):
@@ -1553,24 +1611,47 @@ def verify_ca(page, entity, out_dir, search_name, variants):
     if not filter_filled:
         print("  [WARN] CA filter box not found, trying JS fallback")
         # JS 兜底：直接用 aria-controls 查找
+        # 用 page.evaluate 的参数传递替代字符串插值——search_name 里出现
+        # 单引号/反斜杠/换行（如 "O'Brien"）会直接破坏 JS 语法并被静默吞掉。
         try:
-            page.evaluate(f"""
-                () => {{
+            page.evaluate(
+                """(val) => {
                     const input = document.querySelector("input[aria-controls='sanctions-table']");
-                    if (input) {{
-                        input.scrollIntoView({{behavior: 'smooth', block: 'center'}});
+                    if (input) {
+                        input.scrollIntoView({behavior: 'smooth', block: 'center'});
                         input.focus();
-                        input.value = '{search_name}';
-                        input.dispatchEvent(new Event('input', {{bubbles: true}}));
-                        input.dispatchEvent(new Event('keyup', {{bubbles: true}}));
-                    }}
-                }}
-            """)
+                        input.value = val;
+                        input.dispatchEvent(new Event('input', {bubbles: true}));
+                        input.dispatchEvent(new Event('keyup', {bubbles: true}));
+                    }
+                }""",
+                search_name,
+            )
             page.wait_for_timeout(2000)
-            filter_filled = True
-            print("  [INFO] CA filter filled via JS fallback")
+            # 参数化不等于一定成功：需回读输入框确认值确实落进去了
+            try:
+                actual = page.evaluate(
+                    """() => {
+                        const i = document.querySelector("input[aria-controls='sanctions-table']");
+                        return i ? i.value : null;
+                    }"""
+                )
+            except Exception:
+                actual = None
+            if actual and str(actual).strip() == str(search_name).strip():
+                filter_filled = True
+                print("  [INFO] CA filter filled via JS fallback")
+            else:
+                result["status"] = "manual_review"
+                result["detail"] = (
+                    "CA 检索框填写失败（JS 兜底后回读值与目标不一致），未能执行检索。"
+                    "须人工在加拿大 SEMA 名单核对。"
+                )
+                print(f"  [REVIEW] CA JS fallback value mismatch: {actual!r} != {search_name!r}")
         except Exception as e:
             print(f"  [WARN] CA JS fallback failed: {e}")
+            result["status"] = "manual_review"
+            result["detail"] = f"CA 检索框 JS 兜底执行异常，未能执行检索，须人工核对。原始错误：{e}"
 
     # 等待 DataTable 过滤完成
     page.wait_for_timeout(3000)
@@ -1776,19 +1857,38 @@ def verify_cn_list(page, source_key, entity, out_dir, search_name, variants, max
             if s:
                 result["screenshots"].append(s)
 
+    total_docs = len(docs)
+    coverage = (checked / total_docs) if total_docs else 0.0
+    result["coverage"] = {
+        "total_docs": total_docs,
+        "checked_docs": checked,
+        "coverage_pct": round(coverage * 100, 1),
+    }
+
     if hits:
         first = hits[0]
         result["status"] = "hit"
         result["detail"] = (
             f"命中 {len(hits)} 处；如《{first['title']}》以「{first['variant']}」列名"
+            + (f"（已核 {checked}/{total_docs} 份公告）" if total_docs > checked else "")
         )
         result["hits"] = hits
     elif checked == 0:
         result["status"] = "manual_review"
-        result["detail"] = f"检索到 {len(docs)} 份相关公告但均未能打开"
+        result["detail"] = f"检索到 {total_docs} 份相关公告但均未能打开"
+    elif coverage < CN_MIN_COVERAGE:
+        # 部分公告打不开时判 clean = 把「没查」当成「查了没有」——
+        # 未覆盖的公告等于未核查，必须显式披露并转人工补核。
+        result["status"] = "manual_review"
+        result["detail"] = (
+            f"仅成功打开 {checked}/{total_docs} 份相关公告（覆盖率 {coverage:.0%}，"
+            f"低于 {CN_MIN_COVERAGE:.0%} 阈值）。未能打开的 {total_docs - checked} 份等于未核查，"
+            f"**不得据此认定「未列名」**，须人工补核后重出结论。"
+        )
+        print(f"  [REVIEW] {source_key} coverage {coverage:.0%} < {CN_MIN_COVERAGE:.0%} -> manual review")
     else:
         result["status"] = "clean"
-        result["detail"] = f"已核 {checked} 份相关公告，未命中"
+        result["detail"] = f"已核 {checked}/{total_docs} 份相关公告（覆盖率 {coverage:.0%}），未命中"
 
     result["screenshots"] = [s for s in result["screenshots"] if s]
     return result
@@ -1982,9 +2082,26 @@ def run_verification(entity, sources=None, entity_type="Entity", out_dir="screen
             results.append(merged)
 
             has_valid = any(_check_screenshot_quality(s) for s in merged.get("screenshots", []))
-            if not has_valid and merged.get("screenshots"):
+
+            # ⚠️ 原实现只把「截图质量差」写进 failed_sources，
+            # 而 status == "error" / "manual_review" 的源从不进这个清单——
+            # 结果是「程序性失败」在下游看不到任何痕迹。
+            # 这里改为：任何非 clean 的状态都必须被登记。
+            if merged.get("status") == "error":
                 failed_sources.append({"source": source_key, "name": source_info["name"],
-                                       "reason": "screenshot_quality_low"})
+                                       "reason": "source_error",
+                                       "status": "error",
+                                       "detail": merged.get("detail", "")})
+            elif merged.get("status") == "manual_review":
+                failed_sources.append({"source": source_key, "name": source_info["name"],
+                                       "reason": "status_manual_review",
+                                       "status": "manual_review",
+                                       "detail": merged.get("detail", "")})
+            elif not has_valid and merged.get("screenshots"):
+                failed_sources.append({"source": source_key, "name": source_info["name"],
+                                       "reason": "screenshot_quality_low",
+                                       "status": merged.get("status", ""),
+                                       "detail": merged.get("detail", "")})
 
             print(f"  [MERGED] {source_info['name']}: {merged['status'].upper()} ({len(merged['screenshots'])} screenshots)")
 
