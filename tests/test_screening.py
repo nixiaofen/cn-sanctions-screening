@@ -308,5 +308,119 @@ class TestReportAssetsExtracted(unittest.TestCase):
         self.assertIn("from report_assets import REPORT_CSS", src)
 
 
+# ─────────────────────────────────────────────────────────────
+# 11. 中国清单翻页与覆盖率口径
+#     回归：真实跑「斯凯迪奥公司」曾报"覆盖率100%、未命中"，
+#     根因是只查了列表第 1 页，而该实体在早期批次公告里。
+# ─────────────────────────────────────────────────────────────
+class _FakeAnchor:
+    def __init__(self, title, href):
+        self._t, self._h = title, href
+
+    def inner_text(self):
+        return self._t
+
+    def get_attribute(self, name):
+        return self._h if name == "href" else None
+
+
+class _FakePage:
+    """模拟 layui 分页的列表页：每页若干条，next 可翻页。"""
+
+    def __init__(self, pages, total_items):
+        # pages: list[list[(title, href)]]
+        self._pages = pages
+        self._idx = 0
+        self._total = total_items
+        self.visited_pages = []
+        self.waited = 0
+
+    # ── collect_cn_list_links 用到的接口 ──
+    def query_selector_all(self, sel):
+        self.visited_pages.append(self._idx)
+        return [_FakeAnchor(t, h) for t, h in self._pages[self._idx]]
+
+    def wait_for_timeout(self, ms):
+        self.waited += ms
+
+    def evaluate(self, script):
+        if "querySelector('.pagination')" in script:
+            has_next = self._idx < len(self._pages) - 1
+            return {"total": self._total, "page": self._idx + 1, "hasNext": has_next}
+        if "layui-laypage-next" in script and "click" in script:
+            if self._idx < len(self._pages) - 1:
+                self._idx += 1
+                return True
+            return False
+        raise AssertionError("未预期的 evaluate 调用")
+
+
+class TestChinaListPagination(unittest.TestCase):
+    """分页必须真的翻，且未翻完时不得宣称完整"""
+
+    def test_paginates_beyond_first_page(self):
+        """回归：原实现只查第 1 页，导致早期批次公告漏检"""
+        import browser_verify as bv
+        pages = [
+            [("出口管制管控名单公告2026", "/a1")],                                   # 第1页无关
+            [("关于将某公司列入不可靠实体清单的公告", "/b1")],                       # 第2页才出现
+            [("不可靠实体清单公告补充", "/c1")],
+        ]
+        pg = _FakePage(pages, total_items=57)
+        found, meta = bv.collect_cn_list_links(pg, "https://x/", ["不可靠实体清单"], limit=12)
+        self.assertEqual(len(pg.visited_pages), 3, "应访问全部 3 页")
+        titles = [f["title"] for f in found]
+        self.assertTrue(any("列入不可靠实体清单" in t for t in titles),
+                        f"应找到第 2 页的公告，实际：{titles}")
+
+    def test_meta_reports_total_items_and_exhausted(self):
+        import browser_verify as bv
+        pages = [[("不可靠实体清单公告", "/a")], [("不可靠实体清单公告2", "/b")]]
+        pg = _FakePage(pages, total_items=30)
+        found, meta = bv.collect_cn_list_links(pg, "https://x/", ["不可靠实体清单"], limit=12)
+        self.assertEqual(meta["total_items"], 30)
+        self.assertTrue(meta["exhausted"], "翻到末页应标记 exhausted=True")
+        self.assertEqual(meta["pages_visited"], 2)
+
+    def test_truncation_by_limit_marks_not_exhausted(self):
+        """因达到条数上限而提前停止时，exhausted 必须为 False，
+        否则 verify_cn_list 会据此宣称「已翻完」并误判 clean"""
+        import browser_verify as bv
+        pages = [[("不可靠实体清单公告", f"/a{i}") for i in range(5)],
+                 [("不可靠实体清单公告B", f"/b{i}") for i in range(5)]]
+        pg = _FakePage(pages, total_items=99)
+        found, meta = bv.collect_cn_list_links(pg, "https://x/", ["不可靠实体清单"], limit=3)
+        self.assertEqual(len(found), 3)
+        self.assertFalse(meta["exhausted"],
+                         "达到 limit 提前停止时必须标记未翻完，否则覆盖率口径会失真")
+
+    def test_missing_pagination_is_treated_as_exhausted(self):
+        """没有分页控件的单页列表，视为已翻完（避免误报未完成）"""
+        import browser_verify as bv
+
+        class _NoPager(_FakePage):
+            def evaluate(self, script):
+                if "querySelector('.pagination')" in script:
+                    return {"total": None, "page": None, "hasNext": None}
+                return False
+
+        pg = _NoPager([[("不可靠实体清单公告", "/a")]], total_items=None)
+        found, meta = bv.collect_cn_list_links(pg, "https://x/", ["不可靠实体清单"], limit=12)
+        self.assertEqual(len(found), 1)
+        self.assertTrue(meta["exhausted"])
+
+
+class TestChineseNameWarning(unittest.TestCase):
+    """只给中文名时必须提示补英文名——同一实体在不同批次可能用不同中文译名"""
+
+    def test_warning_text_present_in_source(self):
+        path = os.path.join(SCRIPTS, "browser_verify.py")
+        with open(path, encoding="utf-8") as f:
+            src = f.read()
+        self.assertIn("仅提供了中文名", src,
+                      "exact-name-only 且仅有中文名时应显式警告漏检风险")
+        self.assertIn("英文名", src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

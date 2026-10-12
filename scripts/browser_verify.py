@@ -1944,36 +1944,117 @@ def match_variants_cn(text, variants, prefer_chinese=True):
     return None
 
 
-def collect_cn_list_links(page, base_url, keywords, limit=5):
-    """
-    在中国官方栏目页中筛出标题命中关键词的公告链接。
+def _cn_pagination_state(page):
+    """读取中国政务列表页的分页状态。
 
-    中国管制清单以「商务部公告 / 商务部令」形式逐次发布，
-    不存在可供直接查询的统一数据库，因此需先定位相关公告，再进正文比对。
+    商务部等站点用 layui 分页，容器上带 count（总条数）与 pageno（当前页）。
+    返回 (total_items, current_page, has_next)；取不到时返回 (None, None, None)。
+    """
+    try:
+        return page.evaluate("""() => {
+            const box = document.querySelector('.pagination');
+            if (!box) return {total: null, page: null, hasNext: null};
+            const total = box.getAttribute('count');
+            const cur = box.getAttribute('pageno');
+            const next = document.querySelector('.layui-laypage-next');
+            const hasNext = next ? !next.classList.contains('layui-disabled') : null;
+            return {
+                total: total ? parseInt(total, 10) : null,
+                page: cur ? parseInt(cur, 10) : null,
+                hasNext: hasNext,
+            };
+        }""")
+    except Exception:
+        return {"total": None, "page": None, "hasNext": None}
+
+
+def _cn_goto_next_page(page):
+    """点击「下一页」。成功翻页返回 True；无下一页或点击失败返回 False。"""
+    try:
+        state = _cn_pagination_state(page)
+        if state.get("hasNext") is False:
+            return False
+        clicked = page.evaluate("""() => {
+            const next = document.querySelector('.layui-laypage-next');
+            if (!next || next.classList.contains('layui-disabled')) return false;
+            next.click();
+            return true;
+        }""")
+        if not clicked:
+            return False
+        page.wait_for_timeout(2500)  # 等列表刷新
+        return True
+    except Exception:
+        return False
+
+
+def collect_cn_list_links(page, base_url, keywords, limit=12, max_pages=8):
+    """
+    在中国官方栏目页中筛出标题命中关键词的公告链接，**并自动翻页**。
+
+    中国管制清单以「商务部公告 / 商务部令」形式逐次发布，不存在可直接查询的
+    统一数据库。而一个栏目通常有几十上百条、分多页展示——只查第 1 页会把
+    早期批次公告全部漏掉，进而把「没找到」误报成「未列入」。
+
+    返回 (found, meta)：
+      found — 命中的公告列表
+      meta  — {pages_visited, total_items, exhausted, truncated}
+               exhausted=False 表示因达到 max_pages 上限而未翻完，
+               此时**不得宣称覆盖率 100%**。
     """
     from urllib.parse import urljoin
 
     found = []
-    try:
-        anchors = page.query_selector_all("a")
-    except Exception:
-        return found
+    seen = set()
+    pages_visited = 0
+    total_items = None
+    exhausted = True
 
-    for a in anchors:
+    for _ in range(max_pages):
+        pages_visited += 1
+        state = _cn_pagination_state(page)
+        if state.get("total") is not None:
+            total_items = state["total"]
+
         try:
-            title = (a.inner_text() or "").strip()
-            href = a.get_attribute("href") or ""
+            anchors = page.query_selector_all("a")
         except Exception:
-            continue
-        if not title or not href:
-            continue
-        if any(k in title for k in keywords):
-            item = {"title": title, "url": urljoin(base_url, href)}
-            if item not in found:
-                found.append(item)
-        if len(found) >= limit:
             break
-    return found
+
+        for a in anchors:
+            try:
+                title = (a.inner_text() or "").strip()
+                href = a.get_attribute("href") or ""
+            except Exception:
+                continue
+            if not title or not href:
+                continue
+            if any(k in title for k in keywords):
+                url = urljoin(base_url, href)
+                if url not in seen:
+                    seen.add(url)
+                    found.append({"title": title, "url": url})
+            if len(found) >= limit:
+                break
+
+        if len(found) >= limit:
+            exhausted = False          # 因达到条数上限而提前停止
+            break
+        if not _cn_goto_next_page(page):
+            break                        # 没有下一页 = 已翻完
+    else:
+        exhausted = False                # 跑满 max_pages 仍未到末页
+
+    meta = {
+        "pages_visited": pages_visited,
+        "total_items": total_items,
+        "exhausted": exhausted,
+    }
+    if not exhausted:
+        print(f"  [cn] 列表未翻完（已翻 {pages_visited} 页"
+              + (f"，该栏目共 {total_items} 条" if total_items else "")
+              + "），公告可能不完整")
+    return found, meta
 
 
 def load_cn_index(page, url):
@@ -2015,6 +2096,7 @@ def verify_cn_list(page, source_key, entity, out_dir, search_name, variants, max
         candidates.append(fallback)
 
     docs = []
+    list_meta = {"pages_visited": 0, "total_items": None, "exhausted": False}
     for ci, c_url in enumerate(candidates):
         for retry in range(2):
             if not load_cn_index(page, c_url):
@@ -2022,7 +2104,7 @@ def verify_cn_list(page, source_key, entity, out_dir, search_name, variants, max
             s0 = _screenshot(page, out_dir, source_key, search_name, f"index{ci + 1}")
             if s0:
                 result["screenshots"].append(s0)
-            docs = collect_cn_list_links(page, c_url, keywords, limit=max_docs)
+            docs, list_meta = collect_cn_list_links(page, c_url, keywords, limit=max_docs)
             if docs:
                 break
             print(f"  [{source_key}] 第 {retry + 1} 次未在列表中命中，重试")
@@ -2066,11 +2148,22 @@ def verify_cn_list(page, source_key, entity, out_dir, search_name, variants, max
 
     total_docs = len(docs)
     coverage = (checked / total_docs) if total_docs else 0.0
+    pages_visited = list_meta.get("pages_visited", 0)
+    total_items = list_meta.get("total_items")
+    exhausted = list_meta.get("exhausted", False)
     result["coverage"] = {
         "total_docs": total_docs,
         "checked_docs": checked,
         "coverage_pct": round(coverage * 100, 1),
+        "pages_visited": pages_visited,
+        "list_total_items": total_items,
+        "list_exhausted": exhausted,
     }
+
+    # 列表未翻完 = 早期批次公告可能根本没被看到。此时无论已核多少份，
+    # 都不能判 clean——这正是「斯凯迪奥」假阴性的成因：
+    # 该实体在早期批次公告里，而工具只查了列表第 1 页。
+    list_incomplete = not exhausted
 
     if hits:
         first = hits[0]
@@ -2083,6 +2176,15 @@ def verify_cn_list(page, source_key, entity, out_dir, search_name, variants, max
     elif checked == 0:
         result["status"] = "manual_review"
         result["detail"] = f"检索到 {total_docs} 份相关公告但均未能打开"
+    elif list_incomplete:
+        result["status"] = "manual_review"
+        result["detail"] = (
+            f"栏目列表未翻完（已翻 {pages_visited} 页"
+            + (f"，该栏目共 {total_items} 条" if total_items else "")
+            + f"），早期批次公告可能未被检索到；已打开的 {checked}/{total_docs} 份中未命中。"
+            "**列表不完整时不得认定「未列名」**，须翻完列表或人工补核。"
+        )
+        print(f"  [REVIEW] {source_key} 列表未翻完 -> manual review")
     elif coverage < CN_MIN_COVERAGE:
         # 部分公告打不开时判 clean = 把「没查」当成「查了没有」——
         # 未覆盖的公告等于未核查，必须显式披露并转人工补核。
@@ -2095,7 +2197,10 @@ def verify_cn_list(page, source_key, entity, out_dir, search_name, variants, max
         print(f"  [REVIEW] {source_key} coverage {coverage:.0%} < {CN_MIN_COVERAGE:.0%} -> manual review")
     else:
         result["status"] = "clean"
-        result["detail"] = f"已核 {checked}/{total_docs} 份相关公告（覆盖率 {coverage:.0%}），未命中"
+        result["detail"] = (
+            f"已翻完列表 {pages_visited} 页、核 {checked}/{total_docs} 份相关公告"
+            f"（覆盖率 {coverage:.0%}），未命中"
+        )
 
     result["screenshots"] = [s for s in result["screenshots"] if s]
     return result
@@ -2145,6 +2250,16 @@ def run_verification(entity, sources=None, entity_type="Entity", out_dir="screen
         search_name = entity
         variants = [entity]
         print("  [VARIANTS] 精确名称模式 — 只搜索用户提供的单个名称")
+        # ⚠️ 中国清单以「中文名（English Name）」并列列名，不同批次的公告
+        #    对同一实体可能使用**不同的中文译名**（实例：Skydio 在某批公告中
+        #    列作「辛瑞德有限公司」，而非通行的「斯凯迪奥公司」）。
+        #    只给中文名时，英文并列名匹配不到 → 假阴性。
+        #    因此：仅提供中文名时必须显式提醒补充英文名。
+        if re.search(r'[\u4e00-\u9fff]', entity) and not re.search(r'[A-Za-z]', entity):
+            print("  [WARN] ⚠️ 仅提供了中文名。中国官方公告以「中文名（英文名）」并列列名，"
+                  "且不同批次可能使用不同中文译名——只比对中文名存在漏检风险。")
+            print("         建议通过 --extra-variants 补充该实体的**英文名或注册全名**"
+                  "（英文名是跨批次最稳定的锚点）。")
     elif extra_variants:
         # 用户明确指定了变体列表 → 只用这些，不自动生成
         search_name = entity
@@ -3077,10 +3192,13 @@ Examples:
                 intel_available = bool(raw.get("available", intel_available))
                 if not intel_available:
                     print(f"  [REPORT] {raw.get('message', '情报层不可用，已跳过')}")
-                report.setdefault("_meta", {})["intel_available"] = intel_available
-                report["_meta"]["intel_rounds"] = raw.get("rounds")
-                if not intel_available:
-                    report["_meta"]["intel_message"] = raw.get("message", "")
+                # 情报层状态。原先误写入并不存在的 report 字典（该函数用局部变量
+                # 直接拼 Markdown/HTML，没有 report 对象），会抛 NameError。
+                intel_meta = {
+                    "available": intel_available,
+                    "rounds": raw.get("rounds"),
+                    "message": raw.get("message", ""),
+                }
 
                 # 制裁数据库/清单页面的 URL 特征（非新闻，过滤掉）
                 SANCTIONS_DB_PATTERNS = [
