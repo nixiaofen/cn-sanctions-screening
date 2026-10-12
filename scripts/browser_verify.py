@@ -34,13 +34,26 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
+# Playwright 改为**惰性导入**（原先在模块级 import 并 sys.exit(1)）：
+# 未安装 Playwright 时，本模块连 `--help` 都打不出来，也无法被测试代码导入。
+# 现在只有真正需要驱动浏览器时才要求它，CLI 自省与单元测试不再被 150MB 依赖挡住。
+playwright_import_error = None
 try:
     from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
-except ImportError:
-    print("[ERROR] playwright is required")
-    print("  pip install playwright")
-    print("  python -m playwright install chromium")
-    sys.exit(1)
+except ImportError as _e:  # noqa: F401
+    sync_playwright = None
+    PwTimeout = None
+    playwright_import_error = _e
+
+
+def require_playwright():
+    """在真正需要启动浏览器时调用；缺失则给出可执行的安装指引。"""
+    if sync_playwright is None:
+        print("[ERROR] playwright is required", file=sys.stderr)
+        print("  pip install playwright", file=sys.stderr)
+        print("  python -m playwright install chromium", file=sys.stderr)
+        sys.exit(1)
+    return sync_playwright
 
 # 导入模糊匹配模块（自动变体生成）
 try:
@@ -1922,7 +1935,16 @@ VERIFY_FUNCS = {
 
 
 def run_verification(entity, sources=None, entity_type="Entity", out_dir="screenshots",
-                     headless=False, extra_variants=None, exact_name_only=False):
+                     headless=False, extra_variants=None, exact_name_only=False,
+                     stealth=False):
+    """
+    stealth: 是否启用反检测伪装（UA 伪装 / 隐藏 automation 标记 / 手工 Sec-Fetch 头 /
+             STEALTH_JS 注入）。**默认关闭**。
+             ⚠️ 合规提示：这些手段作用于各国政府官网，可能违反其 Terms of Use
+             或 robots 约定。是否启用须由法务评估后决定，不要在未确认前打开。
+             关闭时被反爬拦截的源会落入 manual_review —— 这是预期行为，
+             不得被当作「未命中」。
+    """
     if sources is None:
         sources = ALL_SOURCES
 
@@ -1963,16 +1985,27 @@ def run_verification(entity, sources=None, entity_type="Entity", out_dir="screen
     print(f"  Output: {os.path.abspath(out_dir)}")
     print(f"{'='*60}\n")
 
-    with sync_playwright() as pw:
-        # 优先使用系统安装的 Chrome（不容易被反爬识别）
-        # 如果没有系统 Chrome，回退到 Playwright 自带的 Chromium
+    # ── 反检测（stealth）开关，默认关闭 ──
+    # stealth=True 时才会做四件事：①隐藏 automation 标记 ②UA 伪装
+    # ③手工 Sec-Fetch-* 请求头 ④注入 STEALTH_JS。
+    # 这四项都是"伪装"，作用于各国政府官网，可能违反其 ToS / robots 约定。
+    if stealth:
+        print("  [BROWSER] stealth 已启用：UA、automation 指纹、Sec-Fetch 请求头均被伪装。")
+        print("           ⚠️ 请确认此举已获法务认可，且符合各目标站点的 Terms of Use。")
+    else:
+        print("  [BROWSER] stealth 未启用（默认，推荐）。")
+        print("           如目标站点因反爬拦截，相关源会落入 manual_review ——")
+        print("           这是预期行为，不得当作「未命中」。")
+
+    with require_playwright()() as pw:
+        # stealth 关闭时只保留无害的启动参数；AutomationControlled 属于伪装，纳入开关
         launch_args = [
-            '--disable-http2',
-            '--disable-blink-features=AutomationControlled',
             '--disable-features=VizDisplayCompositor',
             '--no-first-run',
             '--no-default-browser-check',
         ]
+        if stealth:
+            launch_args.insert(0, '--disable-blink-features=AutomationControlled')
         try:
             browser = pw.chromium.launch(
                 headless=headless,
@@ -1986,17 +2019,21 @@ def run_verification(entity, sources=None, entity_type="Entity", out_dir="screen
                 headless=headless,
                 args=launch_args,
             )
-        context = browser.new_context(
+        # locale / viewport 属常规上下文设置，不是伪装，默认保留；
+        # UA、Sec-Fetch-* 头属指纹伪装，纳入 stealth 开关。
+        context_kwargs = dict(
             viewport={"width": 1440, "height": 1080},
             locale="en-US",
-            timezone_id="America/New_York",
             ignore_https_errors=True,
-            user_agent=(
+        )
+        if stealth:
+            context_kwargs["timezone_id"] = "America/New_York"
+            context_kwargs["user_agent"] = (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/131.0.0.0 Safari/537.36"
-            ),
-            extra_http_headers={
+            )
+            context_kwargs["extra_http_headers"] = {
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.9",
                 "Accept-Encoding": "gzip, deflate, br",
@@ -2005,11 +2042,12 @@ def run_verification(entity, sources=None, entity_type="Entity", out_dir="screen
                 "Sec-Fetch-Site": "none",
                 "Sec-Fetch-User": "?1",
                 "Upgrade-Insecure-Requests": "1",
-            },
-        )
+            }
+        context = browser.new_context(**context_kwargs)
 
-        # 注入隐身脚本到每个新页面
-        context.add_init_script(STEALTH_JS)
+        # 注入隐身脚本到每个新页面（仅 stealth 开启时）
+        if stealth:
+            context.add_init_script(STEALTH_JS)
         page = context.new_page()
 
         # 构建所有需要搜索的变体列表（去重，主搜索名优先）
@@ -2664,7 +2702,27 @@ Examples:
     parser.add_argument("--no-pdf", action="store_true",
                         help="Skip PDF generation (PDF is generated by default)")
 
+    # 反检测伪装开关。默认关闭。
+    # ⚠️ 合规提示（务必先读）：
+    #   开启后会隐藏 automation 标记、伪装 User-Agent、伪造 Sec-Fetch-* 请求头
+    #   并注入 STEALTH_JS。这些手段作用于各国政府官网，可能违反其 Terms of Use
+    #   或 robots 约定，也可能与当地司法辖区的计算机欺诈规则产生冲突。
+    #   **是否允许启用，须由法务评估后决定。** 未经确认请保持关闭。
+    #   关闭时若某源因反爬被拦截，该源会落 manual_review——这是正确行为，
+    #   表示「未能核实」，而不是「未命中」。
+    parser.add_argument("--stealth", action="store_true",
+                        help="启用反检测伪装（默认关闭；开启前须经法务确认符合各站点 ToS）")
+    parser.add_argument("--intel-rounds", choices=["minimal", "standard", "full"], default="standard",
+                        help="Tavily 情报搜索轮次档位：minimal=1轮/standard=4轮(默认)/full=7轮。"
+                             "轮次越多成本越高（Tavily 按次计费）")
+
     args = parser.parse_args()
+    # 环境变量作为等效开关，便于在不改命令行的情况下由配置统一控制
+    if os.environ.get("SANCTIONS_STEALTH") == "1":
+        args.stealth = True
+    if not args.stealth:
+        print("[合规] 反检测伪装（stealth）未启用 —— 目标站点因反爬拦截时，"
+              "相关源将标记为 manual_review（未能核实），不会被当作「未命中」。")
 
     results = run_verification(
         entity=args.entity,
@@ -2674,6 +2732,7 @@ Examples:
         headless=args.headless,
         extra_variants=args.extra_variants or [],
         exact_name_only=args.exact_name_only,
+        stealth=args.stealth,
     )
 
     if args.json:
