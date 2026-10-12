@@ -210,12 +210,22 @@ def calculate_risk_score(report: dict) -> dict:
         "blocked", "frozen", "seized", "indicted", "arrested",
         "制裁", "处罚", "违规", "禁止", "冻结", "查封", "起诉",
     ]
+    # ⚠️ 情报层不可用（未配置 Tavily / 被 --no-intel 跳过 / 调用失败）时，
+    #    "没搜到负面新闻" 与 "没搜" 完全是两回事。
+    #    原实现一律给 0 分并写"未发现负面媒体报道"，会把**跳过**误报成**干净**。
+    intel_available = bool(intel.get("intel_available", True))
     negative_count = 0
-    for n in intel.get("news_results", []):
+    for n in intel.get("news_results", []) or []:
         content = (n.get("title", "") + " " + n.get("content", "")).lower()
         if any(kw in content for kw in negative_keywords):
             negative_count += 1
-    if negative_count >= 5:
+    if not intel_available:
+        dim8_score = 0
+        dim8_detail = (
+            "**情报层未启用，本维度未评估**（未配置 Tavily key 或已跳过情报搜索）。"
+            "此处 0 分表示『未查』，不表示『无负面报道』"
+        )
+    elif negative_count >= 5:
         dim8_score = 8
         dim8_detail = f"{negative_count} 条负面媒体报道"
     elif negative_count >= 2:
@@ -226,8 +236,12 @@ def calculate_risk_score(report: dict) -> dict:
         dim8_detail = f"{negative_count} 条负面媒体报道"
     else:
         dim8_score = 0
-        dim8_detail = "未发现负面媒体报道"
-    dimensions["adverse_media"] = {"score": dim8_score, "detail": dim8_detail}
+        dim8_detail = "已检索情报层，未发现负面媒体报道"
+    dimensions["adverse_media"] = {
+        "score": dim8_score,
+        "detail": dim8_detail,
+        "assessed": intel_available,
+    }
 
     # ── 综合评分 ──
     total_score = sum(d["score"] for d in dimensions.values())

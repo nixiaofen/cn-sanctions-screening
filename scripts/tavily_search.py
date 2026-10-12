@@ -56,7 +56,13 @@ TRUSTED_DOMAINS = [
 
 
 def get_api_keys() -> list:
-    """从环境变量获取 Tavily API Key 列表（支持多 key 自动轮换）"""
+    """从环境变量获取 Tavily API Key 列表（支持多 key 自动轮换）
+
+    ⚠️ 变更：本函数原先在缺 key 时 `sys.exit(1)`。由于 tavily_search 在
+    screen_entity 的模块级被 import，实际效果是**没有 Tavily key 时整个
+    筛查流程无法启动**——把一个付费可选增强模块变成了硬依赖。
+    现改为返回空列表，由调用方决定如何降级。
+    """
     keys_str = os.environ.get("TAVILY_API_KEYS", "")
     if keys_str:
         keys = [k.strip() for k in keys_str.split(",") if k.strip()]
@@ -65,16 +71,25 @@ def get_api_keys() -> list:
     key = os.environ.get("TAVILY_API_KEY", "")
     if key:
         return [key]
-    print("错误：未设置 TAVILY_API_KEYS 或 TAVILY_API_KEY 环境变量", file=sys.stderr)
-    sys.exit(1)
+    return []
+
+
+def has_api_keys() -> bool:
+    """是否配置了 Tavily key（供调用方做能力检测与降级判断）"""
+    return len(get_api_keys()) > 0
 
 
 _current_key_index = 0
 
 
 def get_api_key() -> str:
-    """获取当前使用的 API Key（兼容旧调用方式）"""
+    """获取当前使用的 API Key（兼容旧调用方式）
+
+    无 key 时返回空字符串而非退出——调用方须自行处理。
+    """
     keys = get_api_keys()
+    if not keys:
+        return ""
     return keys[_current_key_index % len(keys)]
 
 
@@ -148,6 +163,18 @@ def tavily_search(
     """
     global _current_key_index
     api_keys = get_api_keys()
+    if not api_keys:
+        # 无 key：返回结构完整的降级结果，而不是终止进程。
+        # 调用方据此把「情报层」标记为不可用，而不是误当作"搜到 0 条"。
+        return {
+            "results": [],
+            "error": "tavily_not_configured",
+            "available": False,
+            "message": (
+                "未配置 TAVILY_API_KEYS / TAVILY_API_KEY，情报搜索层已跳过。"
+                "本次筛查**不含**公开情报/负面媒体维度，风险评分相应维度不可用。"
+            ),
+        }
     last_error = None
 
     for attempt in range(len(api_keys)):
@@ -195,8 +222,27 @@ def tavily_search(
     return {"error": last_error or "所有 API key 均已耗尽", "results": []}
 
 
-def search_entity_sanctions(entity_name: str, max_results: int = 10) -> dict:
-    """搜索特定实体的全球制裁信息（多轮搜索覆盖不同法域）"""
+def search_entity_sanctions(entity_name: str, max_results: int = 10,
+                            rounds: str = "standard") -> dict:
+    """搜索特定实体的全球制裁信息（多轮搜索覆盖不同法域）
+
+    ⚠️ 成本控制：Tavily 按次计费，原实现固定跑满 7 轮（一个实体 = 7 次计费）。
+    现提供 rounds 分档：
+      - "minimal"  : 1 轮（仅 general_sanctions），成本最低
+      - "standard" : 4 轮（默认，含 OFAC / 欧盟 / 出口管制），成本约为原 57%
+      - "full"     : 全部 7 轮，与原行为一致，成本最高
+    未配置 key 时不产生任何计费，直接返回不可用标记。
+    """
+    if not has_api_keys():
+        return {
+            "entity": entity_name,
+            "timestamp": datetime.now().isoformat(),
+            "searches": [],
+            "available": False,
+            "rounds": rounds,
+            "message": "未配置 Tavily key，情报搜索层已跳过（不产生计费）",
+        }
+
     # 注入当前日期到查询中，提升时效性
     today = datetime.now()
     date_hint = today.strftime("%Y")  # 只加年份，避免限制太窄
@@ -204,9 +250,11 @@ def search_entity_sanctions(entity_name: str, max_results: int = 10) -> dict:
         "entity": entity_name,
         "timestamp": today.isoformat(),
         "searches": [],
+        "available": True,
+        "rounds": rounds,
     }
     # 所有轮次统一用 topic='news' 确保返回 published_date
-    search_configs = [
+    all_configs = [
         ("general_sanctions", "entity_sanctions", {"max_results": max_results, "days": 180}),
         ("ofac", "entity_ofac", {"max_results": 5, "days": 365}),
         ("eu_sanctions", "entity_eu", {"max_results": 5, "days": 365}),
@@ -215,6 +263,12 @@ def search_entity_sanctions(entity_name: str, max_results: int = 10) -> dict:
         ("export_control", "entity_export_control", {"max_results": 5, "days": 365}),
         ("china_sanctions", "entity_china", {"max_results": 5, "days": 365}),
     ]
+    budget = {"minimal": 1, "standard": 4, "full": 7}.get(rounds, 4)
+    search_configs = all_configs[:budget]
+    if len(search_configs) < len(all_configs):
+        print(f"[tavily] 轮次档位 '{rounds}'：本次执行 {len(search_configs)}/{len(all_configs)} 轮"
+              f"（已跳过 {', '.join(c[0] for c in all_configs[budget:])}）", file=sys.stderr)
+
     for search_type, template_key, kwargs in search_configs:
         query = SEARCH_TEMPLATES[template_key].format(entity=entity_name)
         # 给首轮搜索注入年份提升时效性

@@ -2893,10 +2893,23 @@ Examples:
             except Exception as e:
                 print(f"  [REPORT] OpenSanctions section skipped: {e}")
             try:
-                from tavily_search import search_entity_sanctions, verify_url
+                from tavily_search import search_entity_sanctions, verify_url, has_api_keys
                 from env_loader import load_dotenv
                 load_dotenv()
-                raw = search_entity_sanctions(args.entity, max_results=8)
+                # 无 key 时情报层整体跳过，并在报告中标明"未查"而非"无结果"
+                intel_available = has_api_keys()
+                raw = search_entity_sanctions(
+                    args.entity,
+                    max_results=8,
+                    rounds=getattr(args, "intel_rounds", "standard"),
+                )
+                intel_available = bool(raw.get("available", intel_available))
+                if not intel_available:
+                    print(f"  [REPORT] {raw.get('message', '情报层不可用，已跳过')}")
+                report.setdefault("_meta", {})["intel_available"] = intel_available
+                report["_meta"]["intel_rounds"] = raw.get("rounds")
+                if not intel_available:
+                    report["_meta"]["intel_message"] = raw.get("message", "")
 
                 # 制裁数据库/清单页面的 URL 特征（非新闻，过滤掉）
                 SANCTIONS_DB_PATTERNS = [
