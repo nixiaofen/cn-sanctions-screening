@@ -30,20 +30,11 @@ from risk_scorer import calculate_risk_score, format_risk_badge
 from fuzzy_match import normalize_name, generate_name_variants
 
 
-# OpenSanctions 数据集 → 官方校验源的映射
-# 根据初筛命中的数据集，决定去哪些官方网站校验
-DATASET_TO_OFFICIAL_SOURCE = {
-    "us_ofac_sdn": ["ofac"],
-    "us_ofac_cons": ["ofac"],
-    "un_sc_sanctions": ["un"],
-    "eu_fsf": ["eu"],
-    "gb_hmt_sanctions": ["uk"],
-    "au_dfat_sanctions": ["au"],
-    "ca_sema_sanctions": ["ca"],
-    "jp_mof_sanctions": [],  # 通过 OpenSanctions 已间接覆盖
-    "us_bis_denied": ["ofac"],
-    "us_state_debarred": ["ofac"],
-}
+# 注：原此处有一份 DATASET_TO_OFFICIAL_SOURCE 映射，与 official_verify.py 的
+#     DATASET_TO_OFFICIAL 内容重复且不一致（如 ca_sema_sanctions vs
+#     ca_dfatd_sema_sanctions），且**定义后从未被引用**——属于死代码，
+#     容易让人误以为它是生效的映射表。已删除，映射以 official_verify.DATASET_TO_OFFICIAL
+#     为唯一来源。
 
 # 数据集显示名称（中英双语）
 DATASET_NAMES = {

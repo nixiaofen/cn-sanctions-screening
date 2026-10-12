@@ -119,7 +119,7 @@ SOURCES = {
     "ca": {
         "name": "Canada SEMA",
         "flag": "[CA]",
-        "url": "https://www.international.gc.ca/world-monde/international_relations-relations_internationales/sanctions/consolidated-consolide.aspx",
+        "url": "https://www.international.gc.ca/world-monde/international_relations-relations_internationales/sanctions/consolidated-consolidie.aspx",
     },
 
     # ============================================================

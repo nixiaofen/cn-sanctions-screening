@@ -117,8 +117,8 @@ OFFICIAL_SOURCES = {
     "ca": {
         "name": "🇨🇦 Canada SEMA",
         "full_name": "Canadian Consolidated Autonomous Sanctions List",
-        "search_url": "https://www.international.gc.ca/world-monde/international_relations-relations_internationales/sanctions/consolidated-consolide.aspx",
-        "search_url_template": "https://www.international.gc.ca/world-monde/international_relations-relations_internationales/sanctions/consolidated-consolide.aspx",
+        "search_url": "https://www.international.gc.ca/world-monde/international_relations-relations_internationales/sanctions/consolidated-consolidie.aspx",
+        "search_url_template": "https://www.international.gc.ca/world-monde/international_relations-relations_internationales/sanctions/consolidated-consolidie.aspx",
         "type": "page_search",
         "browser_steps": [
             "1. 打开加拿大制裁名单页面",
