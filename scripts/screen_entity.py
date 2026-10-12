@@ -159,11 +159,18 @@ def screen_entity(
                 if rid and rid not in seen_ids:
                     seen_ids.add(rid)
                     # 转换 search 结果格式为 match 结果格式
+                    # ⚠️ 原实现用 r.pop 把 name/alias 等字段从顶层移走，
+                    #    导致该 match 顶层不再有 name，下游报告 m.get("name")
+                    #    一律输出 "N/A"——而 /search 兜底路径正是 API 限流时的
+                    #    常规路径。改为复制而非弹出，且保留顶层 name。
+                    r = dict(r)  # 不改动上游返回对象
                     r["matched_variant"] = variant
-                    r["properties"] = {
-                        k: r.pop(k) for k in list(r.keys())
-                        if k in ("name", "alias", "country", "topics", "program")
-                    }
+                    props = {}
+                    for k in ("name", "alias", "country", "topics", "program"):
+                        if k in r:
+                            props[k] = r[k]
+                    props.setdefault("name", r.get("name") or r.get("matched_variant") or "")
+                    r["properties"] = props
                     all_matches.append(r)
 
     # API 都失败时（429 限流等），用网页抓取作为最终 fallback

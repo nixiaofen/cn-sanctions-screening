@@ -71,9 +71,22 @@ def calculate_risk_score(report: dict) -> dict:
     dimensions["sanctions_list_hit"] = {"score": dim1_score, "detail": dim1_detail}
 
     # ── 2. 官方源校验 (0-10) ──
-    verifications = report.get("official_verification", [])
-    verified_hits = sum(1 for v in verifications if v.get("status") == "verified")
-    partial_hits = sum(1 for v in verifications if v.get("status") == "partial")
+    # ⚠️ 词表契约：screen_entity 产出的是「待核验计划」(browser_required)，
+    #    browser_verify 产出的是「核验结果」(hit/clean/manual_review/error)，
+    #    而本函数原先只认 verified/partial —— 两套词从不相交，导致该维度恒为 0。
+    #    现按统一词表判定，并把「尚未核验」与「已核验未命中」严格区分开：
+    #    未完成核验不得被当作"无需核验"。
+    verifications = report.get("official_verification", []) or []
+    v_statuses = [v.get("status") for v in verifications if isinstance(v, dict)]
+
+    # 核验结果（浏览器阶段产出）
+    verified_hits = sum(1 for s in v_statuses if s in ("verified", "hit"))
+    partial_hits = sum(1 for s in v_statuses if s in ("partial", "manual_review"))
+    # 程序性失败：不得算作"已核验无风险"
+    error_count = sum(1 for s in v_statuses if s == "error")
+    # 待核验计划
+    pending_count = sum(1 for s in v_statuses if s == "browser_required")
+
     if verified_hits >= 3:
         dim2_score = 10
         dim2_detail = f"在 {verified_hits} 个官方源中已验证命中"
@@ -82,14 +95,30 @@ def calculate_risk_score(report: dict) -> dict:
         dim2_detail = f"在 {verified_hits} 个官方源中已验证命中"
     elif partial_hits >= 1:
         dim2_score = 4
-        dim2_detail = f"{partial_hits} 个官方源部分验证"
+        dim2_detail = f"{partial_hits} 个官方源需人工复核（manual_review）"
+    elif error_count > 0:
+        dim2_score = 2
+        dim2_detail = f"{error_count} 个官方源核验失败（error），结论不完整，须重跑或人工核对"
+    elif pending_count > 0:
+        dim2_score = 2
+        dim2_detail = (
+            f"{pending_count} 个官方源**尚未核验**（仅生成了核验计划）。"
+            "本维度不构成已核验结论——须先运行 browser_verify.py 完成官网核验"
+        )
     elif matches:
         dim2_score = 2
         dim2_detail = "初筛命中但未通过官方校验（可能是同名）"
     else:
         dim2_score = 0
         dim2_detail = "无需官方校验（初筛清除）"
-    dimensions["official_verification"] = {"score": dim2_score, "detail": dim2_detail}
+    dimensions["official_verification"] = {
+        "score": dim2_score,
+        "detail": dim2_detail,
+        "verified_hits": verified_hits,
+        "manual_review": partial_hits,
+        "errors": error_count,
+        "pending": pending_count,
+    }
 
     # ── 3. 国家/地区风险 (0-10) ──
     countries = []
@@ -154,8 +183,13 @@ def calculate_risk_score(report: dict) -> dict:
     # 最近被制裁的风险更高
     recent = False
     for m in matches:
-        last_change = m.get("last_change", "")
-        if last_change and "2025" in last_change or "2026" in last_change:
+        # 原写法 `if last_change and "2025" in last_change or "2026" in last_change:`
+        # 因 and 优先级高于 or，被解析为 (A and B) or C，
+        # 当 last_change 为 None 时会执行 "2026" in None → TypeError 崩掉整个评分。
+        last_change = m.get("last_change") or ""
+        if not isinstance(last_change, str):
+            last_change = str(last_change)
+        if any(y in last_change for y in ("2026", "2025")):
             recent = True
             break
     if recent:

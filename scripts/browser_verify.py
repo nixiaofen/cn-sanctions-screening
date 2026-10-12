@@ -154,6 +154,15 @@ CN_FALLBACK_URLS = {
 # 打不开的公告等于没查，未覆盖部分不能被「已核 N 份，未命中」掩盖。
 CN_MIN_COVERAGE = 0.6
 
+# 核心清单源：命中即高度可信，通常不是同名误中。
+# ⚠️ 必须全库唯一定义。原实现 CORE_HIT_SOURCES（误中判定）与 CORE_SOURCES（风险分级）
+#    各写一份且差集含 dod_1260h，导致同一份报告 MD 正文说"确认命中"、
+#    HTML 封面说"需复核"，自相矛盾。
+CORE_SOURCES = frozenset({"ofac", "bis_csl", "dod_1260h", "sam", "uk", "un"})
+
+# 泛化清单：条目覆盖面广、同名碰撞多，命中须交叉验证后才能定性
+FP_CANDIDATE_SOURCES = frozenset({"eu", "au", "ca"})
+
 
 # ============================================================
 # 浏览器隐身 JS（注入到每个页面，让 Playwright 伪装成真实 Chrome）
@@ -2233,8 +2242,9 @@ def format_results_markdown(entity, results, entity_type="Entity"):
         "au": {"au_dfat_sanctions"},
         "ca": {"ca_sema_sanctions"},
     }
-    CORE_HIT_SOURCES = {"ofac", "bis_csl", "dod_1260h", "sam", "uk", "un"}
-    FP_CANDIDATE_SOURCES = {"eu", "au", "ca"}  # 泛化清单，容易误中
+    # 核心/泛化清单定义已上移到模块级 CORE_SOURCES / FP_CANDIDATE_SOURCES，
+    # 此处仅保留旧名别名，避免同一概念出现两份定义。
+    CORE_HIT_SOURCES = CORE_SOURCES
 
     # ISO 国家代码碰撞检测
     ISO_CODES = {"DJI": "Djibouti", "CHN": "China", "IRN": "Iran", "PRK": "North Korea",
@@ -2738,9 +2748,9 @@ Examples:
             total = len(results)
 
             # 区分核心制裁清单和非核心清单的命中情况
-            # 核心清单：OFAC, BIS CSL, SAM, UK, UN — 命中这些通常不是误中
-            # 非核心清单：FCC, DoD, EU, AU, CA — 这些可能存在同名实体的误中
-            CORE_SOURCES = {"ofac", "bis_csl", "sam", "uk", "un"}
+            # 统一使用模块级 CORE_SOURCES（原先此处另定义一份且漏掉 dod_1260h，
+            # 与误中判定的 CORE_HIT_SOURCES 不一致，导致同一报告自相矛盾：
+            # MD 正文说"确认命中"、HTML 封面说"需复核"）
             core_hits = [r for r in hits if r.get("source", "") in CORE_SOURCES]
             non_core_hits = [r for r in hits if r.get("source", "") not in CORE_SOURCES]
 
@@ -3344,6 +3354,24 @@ blockquote {
 }
 """
 
+            # 封面「Search Variants」展示串。
+            # ⚠️ 原写法：", ".join(results[0].get("searched", args.entity) ...)
+            # searched 是字符串，join 会逐字符迭代，输出
+            # "H, u, a, w, e, i, , T, e, c, h, n, o, l, o, g, i, e, s" 这类乱码。
+            # 这里统一成：优先展示实际搜索过的名称集合，退回实体名。
+            if results:
+                _searched_raw = results[0].get("searched")
+                if isinstance(_searched_raw, (list, tuple, set)):
+                    _searched_list = [str(x) for x in _searched_raw if str(x).strip()]
+                elif _searched_raw:
+                    _searched_list = [str(_searched_raw)]
+                else:
+                    _searched_list = [args.entity]
+            else:
+                _searched_list = [args.entity]
+            _searched_list = list(dict.fromkeys(_searched_list))  # 去重且保序
+            searched_display = ", ".join(_searched_list)
+
             html_full = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -3426,7 +3454,7 @@ blockquote {
             </div>
         </div>
         <p><strong>Entity:</strong> {args.entity}<br/>
-        <strong>Search Variants:</strong> {", ".join(results[0].get("searched", args.entity) if results else args.entity)}<br/>
+        <strong>Search Variants:</strong> {searched_display}<br/>
         <strong>Report Date:</strong> {now.strftime('%Y-%m-%d %H:%M:%S')}</p>
         {f'<div style="margin-top:15px;padding:12px 18px;background:#eff6ff;border-left:4px solid #2563eb;border-radius:0 6px 6px 0;"><strong>🔍 OpenSanctions Cross-Validation:</strong> {len(os_results_list)} match(es) found in aggregated global sanctions database.{" Top hit: <strong>" + os_results_list[0]["name"] + "</strong>" if os_results_list else ""}</div>' if os_results_list else '<div style="margin-top:15px;padding:12px 18px;background:#f0fdf4;border-left:4px solid #22c55e;border-radius:0 6px 6px 0;"><strong>🔍 OpenSanctions Cross-Validation:</strong> No matches found in aggregated database.</div>'}
     </div>
