@@ -1,6 +1,6 @@
 ---
 name: sanctions-screening
-description: 全球制裁筛查智能引擎。对公司/个人进行全球制裁匹配、出口管制检查，覆盖 100+ 名单，生成含证据截图合规报告。默认执行变体确认；若用户明确给出一个或多个名称并要求只按这些名称搜索，则必须严格使用该名称集合，禁止自动扩展变体。
+description: 全球制裁筛查智能引擎。对公司/个人进行全球制裁匹配、出口管制检查，聚合初筛覆盖 100+ 名单，官方核验覆盖 13 个源（含中国 3 个），生成含证据截图合规报告。默认执行变体确认；若用户明确给出一个或多个名称并要求只按这些名称搜索，则必须严格使用该名称集合，禁止自动扩展变体。
 ---
 
 # 全球制裁筛查智能引擎
@@ -16,18 +16,20 @@ description: 全球制裁筛查智能引擎。对公司/个人进行全球制裁
 ┌─────────────────┐
 │ 第一层：初筛      │ ← OpenSanctions API (/match 端点)
 │ (第三方聚合)      │    覆盖 100+ 全球制裁名单
+│                  │    ⚠️ 无 API key 时降级为网页抓取，须显式标注
 └────────┬────────┘
          │ 命中？
     ┌────┴────┐
     │ 否      │ 是
     ▼         ▼
   清除    ┌────────────────┐
-          │ 第二层：官方校验  │ ← 浏览器直连 10+ 官方网站
-          │ (政府官网)       │    截图取证 + 时间戳
+          │ 第二层：官方校验  │ ← 浏览器直连 13 个官方源
+          │ (政府官网)       │    10 个国际源 + 中国 3 源
+          │                 │    截图取证 + 时间戳 + 覆盖率披露
           └────────┬───────┘
                    ▼
           ┌────────────────┐
-          │ 第三层：情报搜索  │ ← Tavily API (28 个受信源)
+          │ 第三层：情报搜索  │ ← Tavily API（可选，无 key 则跳过并标注）
           └────────┬───────┘
                    ▼
           ┌────────────────┐
@@ -72,7 +74,7 @@ description: 全球制裁筛查智能引擎。对公司/个人进行全球制裁
 
 > 🏢 我判断 **「<用户输入>」** 是 **公司/法人实体**（如果判断错了请纠正）。
 >
-> 🔍 我拟使用以下变体对 10 个全球制裁源进行全量筛查。每个变体都会分别在各网站搜索框搜索并截图取证，因为部分制裁网站对大小写敏感，所以会覆盖大写、小写、首字母大写等多种形式。
+> 🔍 我拟使用以下变体对 13 个官方源（10 个国际源 + 中国 3 源）进行全量筛查。每个变体都会分别在各网站搜索框搜索并截图取证，因为部分制裁网站对大小写敏感，所以会覆盖大写、小写、首字母大写等多种形式。
 >
 > | # | 搜索变体 | 说明 |
 > |---|---------|------|
@@ -166,14 +168,22 @@ python scripts/screen_entity.py "Huawei" --type LegalEntity --extra-variants "hu
 python scripts/screen_entity.py "Huawei" --type LegalEntity --extra-variants "huawei" "HUAWEI" "Huawei Technologies" -o <report>.md
 ```
 
-此步骤自动执行：OpenSanctions 初筛 + Tavily 情报搜索 + 生成浏览器校验计划。
-**🔴 禁止使用 `--no-intel` 参数** — Tavily 情报搜索是第三层核心环节，必须执行。
+此步骤自动执行：OpenSanctions 初筛 + Tavily 情报搜索（可选）+ 生成浏览器校验计划。
+
+**关于 `--no-intel`**：Tavily 是**付费**情报源，自 v1.1 起为**可选增强**，不再是硬性依赖。
+- **已配置 `TAVILY_API_KEY(S)`**：默认执行情报搜索，不要加 `--no-intel`；控制成本用 `--intel-rounds`（见阶段 2）。
+- **未配置 key**（多数零成本场景）：脚本自动跳过并写 `available=False / error=tavily_not_configured`，**不会中断**；此时无需手动加 `--no-intel`，但报告中必须写明「情报维度未查」。
+- 只有在用户明确要求「不做情报搜索」时才主动加 `--no-intel`。
+
+> ⚠️ **报告纪律**：情报维度不可用时，风险评分第 8 维会标 `assessed=False` 并注明「0 分表示未查，非无风险」。
+> **禁止把「未查」写成「无风险」。**
+
 **完成后立即进入阶段 2，不要停下来向用户报告中间结果。**
 
 ### 阶段 2：官方网站浏览器校验（自动）
 
 > 🚫 **禁止自己写浏览器脚本。** 直接运行已封装好的 `scripts/browser_verify.py`。
-> 🚫 **禁止裁减源列表。** 不要加 `--sources` 参数，必须一次性跑完全部 10 个官方源。
+> 🚫 **禁止裁减源列表。** 不要加 `--sources` 参数，必须一次性跑完全部 13 个官方源。
 
 **命令模板（❗ 注意：主搜索词是最短常用名，不是全名）**：
 
@@ -229,26 +239,72 @@ python scripts/browser_verify.py "Zhang San" \
 - `--exact-name-only` — 只搜索输入的单个名称，**禁止自动扩展任何变体**
 - `--type Entity|Individual` — 对应阶段 0 用户回答
 - `--report <路径>` — 直接输出 HTML 报告
+- `--stealth` — 反检测伪装，**默认关闭**。仅在目标站点因反爬拦截、且你已确认该行为符合站点条款与内部合规要求时才加；启用时终端会打印合规提示
+- `--intel-rounds minimal|standard|full` — 情报轮次预算（默认 `standard`）
+  - `minimal` = 1 轮（仅 general_sanctions），成本最低
+  - `standard` = 4 轮（含 OFAC / 欧盟 / 出口管制），**默认**，成本约为原来的 57%
+  - `full` = 7 轮，与改造前行为一致，成本最高
+- `--no-pdf` — 跳过 PDF 渲染，只出 HTML
 
-> ⚠️ **重要：不要加 `--sources` 参数！** 默认会自动校验全部 10 个官方源（OFAC、BIS CSL、DoD 1260H、SAM.gov、FCC、UK、UN、EU、AU、CA）。
+> ⚠️ **重要：不要加 `--sources` 参数！** 默认会自动校验全部 13 个官方源：
+> 国际 10 源 `ofac` `bis_csl` `dod_1260h` `sam` `fcc` `uk` `un` `eu` `au` `ca`
+> ＋ 中国 3 源 `cn_ucl`（不可靠实体清单）`cn_control`（出口管制管控名单）`cn_counter`（反制清单）。
 
 此脚本自动完成：
-- 访问全部 10 个官方制裁搜索网站；默认模式下用**全名 + 所有变体**逐一搜索
+- 访问全部 13 个官方源；默认模式下用**全名 + 所有变体**逐一搜索
 - 若启用“用户指定名称集合模式”，则**只搜索用户明确给出的 1-N 个名称**，无论是 1 个、2 个、4 个还是更多
+- **中国源自动翻页**：列表页按 layui 分页逐页翻到底，返回 `meta{pages_visited,total_items,exhausted}` 并在报告中披露覆盖率
 - **分页截图**：如果搜索结果有多页，逐页翻页截图
 - **PDF 逐页截图 + 精确高亮**：DoD 1260H 等 PDF 名单，逐页 PageDown + PyMuPDF 黄色高亮
 - **XLSX 下载分析**：澳大利亚 DFAT 名单下载 XLSX，pandas 分析后渲染截图
 - 截图取证并保存到指定目录
 - 输出汇总结果表（命中/清除/需人工确认）
 
+> 🔴 **只给中文名时的强制动作**：中国官方公告以「中文名（English Name）」并列列名，
+> 且**同一实体在不同批次公告中中文译名可能不同**（英文名相对稳定）。
+> 若 `--exact-name-only` 且名称只含中文，脚本会打印 `[WARN]` 并拒绝给出 clean 结论。
+> 你必须向用户追问英文名或注册全名，再用 `--extra-variants` 补入后重跑。
+
 **首次使用需安装依赖：**
 
 ```bash
-pip install playwright
-python -m playwright install chromium
+pip install -r requirements.txt
 ```
 
+> 💾 **磁盘空间紧张时（如 C 盘不足）**：不要下载 Chromium（约 400MB）。
+> 脚本默认走系统已安装的 Chrome（`channel="chrome"`），只需 `pip install -r requirements.txt`。
+> 若要把依赖装到非系统盘：
+> ```bash
+> python -m venv D:/AAAWorkBuddy/tools/screening-venv
+> D:/AAAWorkBuddy/tools/screening-venv/Scripts/pip install -r requirements.txt
+> set PIP_CACHE_DIR=D:/AAAWorkBuddy/tmp/pip-cache
+> set PLAYWRIGHT_BROWSERS_PATH=D:/AAAWorkBuddy/tools/playwright-browsers
+> set TMPDIR=D:/AAAWorkBuddy/tmp
+> ```
+
 **完成后立即进入阶段 2.5，不要停下来向用户报告中间结果。**
+
+### 阶段 2.2：结果状态怎么读（禁止望文生义）
+
+脚本对每个源输出一个 `status`。**只有 `hit` 和 `clean` 可以直接下结论**，其余都是「待处理」：
+
+| status | 含义 | 报告里必须怎么写 |
+|--------|------|------------------|
+| `hit` | 在名单页检索到匹配记录 | 命中，进入误中审查 |
+| `clean` | 名单完整加载且已比对，未发现匹配 | 未命中（**须同时披露覆盖率**） |
+| `manual_review` | 程序性失败：解析失败 / 页面未加载 / 覆盖率不足 / 列表未翻完 | **「未能完成核查」**，不得写成「未列名」 |
+| `error` | 请求层失败（超时、被拒绝、网络错误） | **「核查失败」**，须重跑或改人工 |
+| `pending` | 本次未执行该源 | 未查，非无风险 |
+
+> 🔴 **合规红线**：`manual_review` 与 `clean` 的法律后果完全不同。
+> 把「没查成」写成「查了没有」，是本项目此前最严重的一类缺陷，已在 v1.1 修复，**不得回退**。
+> 汇总时若任一源为 `manual_review`/`error`，最终结论不得写「全部未命中」，必须写「N 个源已完成，M 个源未完成」。
+
+**中国 3 源的额外披露要求**（`cn_ucl` / `cn_control` / `cn_counter`）：
+
+- 报告须写明**翻了几页、该栏目共几条、是否翻到底**（`pages_visited` / `total_items` / `exhausted`）。
+- 公告打开率低于 **`CN_MIN_COVERAGE = 0.6`** 时，脚本判定 `manual_review`，不判 clean。
+- 中国清单以「商务部公告 / 商务部令」逐次发布，**不提供统一在线查询库**，因此走「栏目列表页 → 定位公告 → 进正文 → 全文比对 → 截图留痕」路径；栏目结构改版会导致漏检，须人工复核兜底。
 
 ### 阶段 2.5：误中审查（自动，禁止跳过）
 
@@ -287,7 +343,7 @@ read_file: references/false_positive_check.md
 2. **法律影响分析**：读取 `references/legal_implications.md` 模板，针对每个**确认命中**的清单给出法律影响
 3. **OpenSanctions 初筛结果**：匹配实体、命中名单、匹配分数
 4. **官方校验证据**：每个源的校验结果 + 截图内嵌 + **🟡 误中标注**（如有）
-5. **情报摘要**：Tavily 新闻搜索结果
+5. **情报摘要**：Tavily 新闻搜索结果（不可用则写明「情报维度未查」及原因）
 6. **管理层底线结论**：参考 `references/legal_implications.md` 中的 Executive Action Plan 模板
 7. **证据清单**：所有截图和数据文件的汇总表
 
@@ -320,27 +376,33 @@ read_file: references/false_positive_check.md
 
 ### 依赖安装
 
-脚本仅使用 Python 标准库 + 1 个第三方包。如缺少则安装：
-
 ```bash
-# 核心依赖（仅 markdown 是第三方包）
-pip install markdown
-
-# 可选：澳大利亚 DFAT XLSX 分析需要
-pip install pandas openpyxl
+pip install -r requirements.txt
 ```
+
+- `markdown` — 报告渲染
+- `playwright` — 官网核验与 PDF 渲染（**默认复用系统 Chrome，不下载 Chromium**）
+- `pandas` / `openpyxl` — 澳大利亚 DFAT XLSX 名单分析（可选）
+- `pymupdf` (fitz) — DoD 1260H 等 PDF 名单的高亮与文本抽取（按需导入）
+
+> 未装 `playwright` 时，`browser_verify.py` 仍可运行到「需要浏览器」的步骤才报错——
+> 依赖是**惰性导入**的，不会在模块加载阶段整条链路崩掉。
 
 ### 工作目录
 
-**所有脚本必须从 Skill 根目录执行**（`scripts/` 之间有相互导入依赖）。
+**所有脚本必须从项目根目录执行**（`scripts/` 之间有相互导入依赖）。
 
-### API Key
+### API Key（两个都是可选的）
 
-在 Skill 根目录创建 `.env`（可参考 `.env.example`），脚本启动时由 `env_loader` 自动加载。
+在根目录创建 `.env`（可参考 `.env.example`），脚本启动时由 `env_loader` 自动加载。
 
-- **OPENSANCTIONS_API_KEY**：OpenSanctions 聚合初筛（必填，用于 match / 交叉验证）
-- **TAVILY_API_KEYS**：逗号分隔的多个 Tavily key，配额耗尽时自动轮换（推荐）
-- **TAVILY_API_KEY**：单 key 备选
+| 变量 | 作用 | 缺失时的行为 |
+|------|------|--------------|
+| `OPENSANCTIONS_API_KEY` | 聚合初筛 `/match`、`/search` | `/match`、`/search` 返 401 → 自动降级为**网页抓取**（`scrape_opensanctions`），初筛维度仍可出结果，但**必须标注数据来源为网页抓取** |
+| `TAVILY_API_KEYS`（逗号分隔，配额轮换）/ `TAVILY_API_KEY` | 第三层情报 | 跳过，`available=False`，风险评分第 8 维标 `assessed=False` |
+
+> 💰 **零成本可用**：两个 key 都不配也能跑完 13 源的官网核验，只是第一层降级、第三层缺失。
+> 缺哪个维度就在报告里写明哪个维度未查，**禁止静默当作「无风险」**。
 
 ## 法律影响分析
 
@@ -359,6 +421,38 @@ pip install pandas openpyxl
 - 例：`大疆` → `dji`, `SZ DJI Technology`, `Da Jiang Innovations`
 
 变体生成逻辑在 `scripts/fuzzy_match.py` 中实现。若用户明确要求只按给定名称集合筛查，则**不要调用这套自动扩展逻辑**。
+
+## 能力边界（不得越界承诺）
+
+1. **只覆盖 13 个源**。不在列表内的中国管制物项清单（如《两用物项出口管制清单》本身、军品出口管理清单）、以及各国行业性许可名单（如 EAR 实体清单未涵盖的许可例外），**不在本工具核查范围内**，须另行检索。
+2. **不能判定物项是否受管制**。本工具做的是**主体名称比对**；两用物项/ECCN 归类、最终用途与最终用户判断不在能力内。
+3. **「未列入」不等于「不受限制」**。存在间接持股、50% 规则、穿透式管制、以及尚未公开的限制措施——工具看不到未公开信息。
+4. **不做批量定性**。模糊匹配命中的候选只做**标记**，是否同一主体须人工按 ≥2 项身份要素交叉核验（统一社会信用代码 / 注册号 / LEI / 税号、注册地、成立日期、经营范围、集团结构）。
+5. **不构成法律意见**。输出是事实整理与风险线索，最终结论由持牌律师出具。
+
+## 基础假设（使用前先确认成立）
+
+- **假设 1**：用户提供的名称是**可检索的正式名称或常用商号**；纯中文名且无英文名时，中国源命中率显著下降（见阶段 2 的强制追问规则）。
+- **假设 2**：目标站点**当前可访问且结构未改版**。政务站点节流、改版、验证码都会导致 `manual_review`；此时应改用人工检索而非反复重跑。
+- **假设 3**：筛查结论**仅在报告载明的检索时点成立**。制裁名单持续更新，报告建议有效期不超过 7 天；对持续交易应建立复核节奏。
+
+**建议复核节奏**：首次筛查 → 交易前复核 → 名单重大更新后复核 → 长期合作方季度复核。每次复核都重新出报告并归档，不要复用旧截图。
+
+## 与 `cn-sanctions-retrieval-skill` 的交接
+
+两个工具分工不同，**互补而非替代**：
+
+| | 本工具（screening） | `cn-sanctions-retrieval-skill` |
+|---|---|---|
+| 干什么 | 13 源**自动化**批量核验，出带截图的报告 | 中国 4 张无接口清单的**人工检索** SOP |
+| 适用 | 名称明确、可走搜索框/列表页的源 | 无查询接口、须逐条翻公告比对 |
+| 产物 | HTML/PDF 报告 + 截图 | 核查记录 + 留痕模板 |
+
+**交接触发条件**：当本工具出现以下任一情况时，转人工检索 skill 处理，并在报告中写明「已转人工核查」：
+
+- 中国 3 源任一支返回 `manual_review` 或 `error`；
+- 出现模糊命中待定性（同名/近名）；
+- 需要核查的实体不在 13 源覆盖范围内（如恶意实体清单等尚未纳入自动化的清单）。
 
 ## 报告解读
 
@@ -380,23 +474,40 @@ pip install pandas openpyxl
 - **legal_implications.md** — 各清单法律影响分析模板和咨询意见模板
 - **country_risk_tiers.md** — 国家/地区风险分级表
 - **red_flags_checklist.md** — BIS "Know Your Customer" 红旗检查清单
+- **false_positive_check.md** — 误中判定规则（阶段 2.5 必读）
+- **cn_entity_false_positive.md** — 中文实体七类特有误报模式（高频字号撞名、简繁异体、音译分歧、中资离岸架构、母子公司混同等）
 
 ## 脚本索引
 
 | 脚本 | 用途 |
 |------|------|
-| `screen_entity.py` | 核心筛查引擎（三层架构） |
-| `official_verify.py` | 官方政府网站直连校验（生成浏览器操作指令） |
-| `generate_report.py` | 专业 PDF 报告生成（封面页 + 证据内嵌 + Chrome/Edge Headless） |
-| `opensanctions_search.py` | OpenSanctions API 查询 |
-| `tavily_search.py` | Tavily 情报搜索 |
-| `batch_screen.py` | 批量筛查 |
+| `browser_verify.py` | **主入口**。13 源官网自动化核验 + 截图 + HTML/PDF 报告 |
+| `screen_entity.py` | 阶段 1 筛查引擎（初筛 + 情报 + 生成核验计划） |
+| `risk_scorer.py` | 8 维度风险评分引擎（未查维度标 `assessed=False`） |
+| `opensanctions_search.py` | OpenSanctions API 查询（含网页抓取兜底） |
+| `tavily_search.py` | Tavily 情报搜索（可选依赖，无 key 优雅降级） |
+| `report_assets.py` | 报告渲染的 CSS/JS 静态资源（自 `browser_verify.py` 外提） |
+| `official_verify.py` | 官方源 URL 与背景元数据 |
+| `generate_report.py` | PDF 报告生成（封面页 + 证据内嵌） |
+| `batch_screen.py` | 批量筛查（CSV / 逗号分隔列表） |
 | `fuzzy_match.py` | 模糊匹配和中文名变体生成 |
-| `risk_scorer.py` | 8 维度风险评分引擎 |
+| `env_loader.py` | `.env` 加载 |
+| `tests/test_screening.py` | 36 项回归测试（纯 unittest，`python -m unittest discover -s tests`） |
+
+### 回归测试
+
+改动 `scripts/` 后应跑一遍；测试不联网、不需要 key：
+
+```bash
+python -m unittest discover -s tests -v     # 期望 Ran 36 tests ... OK
+```
 
 ## 免责声明
 
 - 本工具仅供参考，不构成法律意见
-- OpenSanctions 为第三方聚合数据，命中结果需通过官方源校验
+- OpenSanctions 为第三方聚合数据，命中结果需通过官方源校验；无 API key 时降级为网页抓取，须在报告中注明
+- **`manual_review` / `error` 表示「没查成」，不得表述为「未列名」**
+- 中国清单自动化检索存在漏检风险（栏目改版、公告不定期发布、译名不一致）
 - 制裁名单持续更新，筛查报告建议有效期不超过 7 天
+- `--stealth` 涉及对目标站点的指纹伪装，启用前须确认符合站点条款与内部合规要求
 - 最终合规决策应咨询具有执业资格的律师或合规专家

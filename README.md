@@ -6,7 +6,10 @@
 > 本仓库提供的是**技术辅助工具与流程模板**，输出内容为基于公开数据源与自动化抓取的**事实整理与风险线索汇总**，**不构成法律意见、监管解读或终局合规结论**。是否阻断交易、如何起草法律文件、是否满足特定义务，须由**具有执业资格的专业人士**结合具体事实管辖与业务场景独立判断。  
 > 制裁与出口管制规则更新频繁，任何筛查报告的**时效性有限**；请以各司法辖区**官方最新公布文本与执法实践**为准。
 
-**仓库地址：** [github.com/TracyWang95/DataInftra-CrossBoardTrustedDataPace-SanctionScreening](https://github.com/TracyWang95/DataInftra-CrossBoardTrustedDataPace-SanctionScreening)
+- **上游：** [github.com/TracyWang95/DataInftra-CrossBoardTrustedDataPace-SanctionScreening](https://github.com/TracyWang95/DataInftra-CrossBoardTrustedDataPace-SanctionScreening)
+- **本 fork：** [github.com/nixiaofen/cn-sanctions-screening](https://github.com/nixiaofen/cn-sanctions-screening)
+
+当前分支 `p0-correctness` 为**正确性修复支**：在保留上游三层架构的基础上，修正了 11 处会导致**假阳性（误报命中）或假阴性（漏报）**的缺陷，并让两个付费依赖变为可选。改造细节见下文「v1.1 正确性修复」。
 
 ---
 
@@ -69,6 +72,48 @@ python scripts/browser_verify.py "某公司" --sources cn_ucl cn_control cn_coun
 
 ---
 
+## v1.1 正确性修复
+
+上游实现能跑通链路，但在真实数据上会出现**把没查成报成查了没有**这类问题——对合规场景而言，这是最不能接受的一类错误。本轮修复 11 处，并提供 36 项回归测试。
+
+### 假阴性（漏报）
+
+| 问题 | 现象 | 修复 |
+|------|------|------|
+| 中国清单只翻第 1 页 | 栏目共 4 页 57 条，只比对首屏 10 条就报「覆盖率 100%」，实体恰在第 3 页 → **漏报** | `collect_cn_list_links` 按 layui 分页自动翻到底，返回 `{pages_visited,total_items,exhausted}` 并在报告披露 |
+| 中国公告中文译名不一致 | 同一实体在不同批次公告中译名不同（英文名稳定），只给中文名 → 匹配不到 | 仅提供中文名时打印 `[WARN]`，要求用 `--extra-variants` 补英文名 |
+| UN 名单 SPA 未加载即判 clean | 页面尚未渲染完就按「未匹配」返回 clean | 增加加载判定与正文字数下限，不可解析时落 `manual_review` |
+| UK 名单正则未命中即判 clean | 解析条数为 0 仍返回 clean | 按 `count_parsed` 三分支处理，异常落 `manual_review` |
+| 加拿大源 URL 拼写错误 | `consolidated-consolide.aspx` 长期 404，该源从未真正跑通 | 修正为 `consolidated-consolidie.aspx`（两处，已与权威 URL 核对） |
+
+### 假阳性（误报）
+
+| 问题 | 现象 | 修复 |
+|------|------|------|
+| DoD 1260H PDF 解析失败仍报命中 | PyMuPDF 失败时回退为「搜索名 = 命中名」，必然误报 | 改为 `parse_failed` + `manual_review` |
+| 泛化清单泛匹配 | EU/AU/CA 的 ISO 国家代码碰撞等被计为命中 | 阶段 2.5 误中审查自动标注降级 |
+
+### 工程与可用性
+
+- **Tavily 改为可选依赖**：原实现在模块加载时 `sys.exit`，无 key 直接整条链路中断。现在无 key 返回 `available=False`，基础筛查照常跑，情报维度标注「未查」。
+- **`--intel-rounds` 控制成本**：`minimal`(1 轮) / `standard`(4 轮，默认) / `full`(7 轮)，默认档成本约为原来的 57%。
+- **反检测伪装默认关闭**：原实现强制注入 stealth JS（UA 伪装、隐藏 automation 标记、手工 Sec-Fetch 头）。改为 `--stealth` 开关，默认关闭并打印合规提示。
+- **状态词表统一**：`hit` / `clean` / `manual_review` / `error` / `pending`，评分器按统一词表计分，`browser_required` 不再被当作「已验证」。
+- **风险评分第 8 维**：情报不可用时标 `assessed=False` 并注明「0 分表示未查，非无风险」；`last_change=None` 时的运算符优先级崩溃一并修复。
+- **惰性导入 Playwright**：未装浏览器依赖时不再整模块崩掉。
+- **报告静态资源外提**至 `scripts/report_assets.py`，`browser_verify.py` 回归采集单一职责。
+- **源元数据集中化**：`SOURCE_PROFILES` 统一 13 源的配置与背景，`validate_source_profiles()` 自检完整性。
+
+### 回归测试
+
+```bash
+python -m unittest discover -s tests -v     # Ran 36 tests ... OK
+```
+
+测试不联网、不需要 API key，覆盖分页翻页、覆盖率判定、中文名警告、Tavily 降级、URL 拼写等。
+
+---
+
 ## 律师场景：本工具能做什么
 
 | 场景 | 说明 |
@@ -88,10 +133,15 @@ python scripts/browser_verify.py "某公司" --sources cn_ucl cn_control cn_coun
    对接 [OpenSanctions](https://www.opensanctions.org/) 等聚合数据，覆盖全球 **100+** 制裁与涉敏名单数据集，用于**快速定位候选命中**。聚合数据可能存在延迟或匹配误差，**不能单独作为终局依据**。
 
 2. **第二层 — 官方网站核验（Playwright）**  
-   通过浏览器自动化访问多国/多机构**官方公开查询入口**（如 OFAC、BIS CSL、UN、EU、UK、澳大利亚 DFAT、加拿大 SEMA 等路径，以脚本内配置为准），进行搜索并**截图留痕**，便于工作底稿归档。
+   通过浏览器自动化访问 **13 个官方公开查询入口**
+   （国际 10 源：OFAC、BIS CSL、DoD 1260H、SAM.gov、FCC、UK、UN、EU、AU、CA；
+   中国 3 源：不可靠实体清单、出口管制管控名单、反制清单），
+   进行搜索并**截图留痕**，便于工作底稿归档。结果状态为
+   `hit` / `clean` / `manual_review` / `error` / `pending`，**只有前两者可直接下结论**。
 
-3. **第三层 — 受控情报摘要（Tavily）**  
+3. **第三层 — 受控情报摘要（Tavily，可选）**  
    对限定域/受信新闻与公开网页进行检索，用于**补充上下文**（如公开报道、监管动态），不替代官方法律文本。
+   **未配置 key 时该层跳过并显式标注「未查」**，不影响其余两层。
 
 4. **误中审查（False Positive）**  
    对「泛化清单」与易混淆命中（如国家代码碰撞、部分字符串匹配）进行**自动标注与降级提示**，减少将无关实体误判为制裁对象的风险。具体规则见 `references/false_positive_check.md` 与 `scripts/browser_verify.py` 内配置。
@@ -110,27 +160,40 @@ python scripts/browser_verify.py "某公司" --sources cn_ucl cn_control cn_coun
 ### 安装
 
 ```bash
-cd sanctions-screening   # 或克隆后的项目根目录
+cd cn-sanctions-screening
 pip install -r requirements.txt
-python -m playwright install chromium
 ```
 
-### 配置密钥（切勿提交 `.env`）
+浏览器默认**复用系统已安装的 Chrome**，无需 `playwright install chromium`（省约 400MB）。
+若系统无 Chrome，再执行 `python -m playwright install chromium`。
+
+> **磁盘空间不足时**（例如 C 盘吃紧），可把依赖与缓存整体放到其他盘：
+> ```bash
+> python -m venv D:/AAAWorkBuddy/tools/screening-venv
+> D:/AAAWorkBuddy/tools/screening-venv/Scripts/pip install -r requirements.txt
+> set PIP_CACHE_DIR=D:/AAAWorkBuddy/tmp/pip-cache
+> set PLAYWRIGHT_BROWSERS_PATH=D:/AAAWorkBuddy/tools/playwright-browsers
+> set TMPDIR=D:/AAAWorkBuddy/tmp
+> ```
+
+### 配置密钥（可选，切勿提交 `.env`）
 
 ```bash
 copy .env.example .env   # Windows；Unix 使用 cp
 ```
 
-编辑 `.env`，填入：
+**两个 key 都不是必需的**，缺失时工具降级运行而非中断：
 
-- `OPENSANCTIONS_API_KEY` — [OpenSanctions API](https://www.opensanctions.org/api/)
-- `TAVILY_API_KEYS` 或 `TAVILY_API_KEY` — [Tavily](https://tavily.com/)
+| 变量 | 缺失时的行为 |
+|------|--------------|
+| `OPENSANCTIONS_API_KEY` | `/match`、`/search` 返 401 → 自动降级为网页抓取，初筛仍可用（须注明数据来源） |
+| `TAVILY_API_KEYS` / `TAVILY_API_KEY` | 第三层跳过，风险评分标注该维度「未查」 |
 
 本仓库 **`.gitignore` 已排除 `.env`**；若您曾将密钥写入其他文件并误提交，请立即**轮换密钥**并自 Git 历史中清除敏感提交（可使用 `git filter-repo` 等工具，或新建空仓库仅保留净提交）。
 
 ### 命令行示例（从项目根目录执行）
 
-初筛与情报汇总（阶段 1 思路，具体参数见 `SKILL.md`）：
+初筛与情报汇总（阶段 1，具体参数见 `SKILL.md`）：
 
 ```bash
 python scripts/screen_entity.py "Example Corp" --type LegalEntity -o Example_api_report.md
@@ -139,7 +202,14 @@ python scripts/screen_entity.py "Example Corp" --type LegalEntity -o Example_api
 官网核验与 HTML/PDF 报告（阶段 2+，需已安装 Playwright）：
 
 ```bash
-python scripts/browser_verify.py "Example" --type Entity --extra-variants "example corp" -o screenshots/ --report Example_sanctions_report.html --api-report Example_api_report.md
+python scripts/browser_verify.py "Example" --type Entity --extra-variants "example corp" \
+  -o screenshots/ --report Example_sanctions_report.html --api-report Example_api_report.md
+```
+
+只跑中国三源、且只按给定中文名检索（会提示补充英文名）：
+
+```bash
+python scripts/browser_verify.py "斯凯迪奥公司" --sources cn_ucl cn_control cn_counter --exact-name-only
 ```
 
 批量场景见 `scripts/batch_screen.py`。
@@ -155,9 +225,15 @@ python scripts/browser_verify.py "Example" --type Entity --extra-variants "examp
 | `references/false_positive_check.md` | 误中判断指引 |
 | `references/us_lists_coverage.md` | 美国主要清单覆盖说明 |
 | `references/red_flags_checklist.md` | BIS「了解你的客户」类红旗检查参考 |
+| `scripts/browser_verify.py` | 官网自动化检索（13 源）与截图、报告生成 |
 | `scripts/screen_entity.py` | 初筛 + 情报 + 校验计划整合 |
-| `scripts/browser_verify.py` | 官网自动化检索与截图、报告生成 |
-| `scripts/opensanctions_search.py` / `tavily_search.py` | API 封装 |
+| `scripts/risk_scorer.py` | 8 维度风险评分 |
+| `scripts/report_assets.py` | 报告渲染 CSS/JS |
+| `scripts/opensanctions_search.py` / `tavily_search.py` | API 封装（后者为可选依赖） |
+| `scripts/fuzzy_match.py` | 模糊匹配与中文名变体生成 |
+| `scripts/batch_screen.py` | 批量筛查 |
+| `tests/test_screening.py` | 36 项回归测试 |
+| `references/cn_entity_false_positive.md` | 中文实体七类特有误报模式 |
 | `requirements.txt` | Python 依赖一览 |
 
 **仓库范围：** 仅同步 `SKILL.md`、`references/`、`scripts/` 及上述配置文件。运行产生的 `screenshots/`、`*_sanctions_report.*`、`*_api_report.md` 以及微信推广类文稿等已列入 `.gitignore`，留在本地即可，不会进入 Git。
@@ -170,6 +246,7 @@ python scripts/browser_verify.py "Example" --type Entity --extra-variants "examp
 
 - 将**评级**视为**排程与复核优先级**的参考，而非替代《出口管理条例》《国际紧急经济权力法》等规则下的实体分析；
 - 对**疑似误中**条目必须人工复核全名、地址、别名与主体类型；
+- **`manual_review` / `error` 是「没查成」，不是「查了没有」**——汇总结论不得写成「全部未命中」；
 - 在对外交付中明确**筛查时间、检索式、数据源版本与限制条件**。
 
 ---
